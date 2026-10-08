@@ -186,7 +186,7 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
           cache: pip
-      - uses: astral-sh/ruff-action@v4.0.0
+      - uses: astral-sh/ruff-action@v4.1.0
         with:
           args: 'check --output-format=github'
       - name: Detect formatter
