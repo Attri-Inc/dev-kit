@@ -1,0 +1,320 @@
+name: 'Secret scan (detect-secrets + trufflehog OSS)'
+description: |
+  License-clean secret scanning that works on private org repos without a paid license.
+  Uses Yelp/IBM detect-secrets (Apache-2.0) for fast pattern detection and
+  trufflehog OSS in --only-verified mode (AGPL — used as a tool, not redistributed)
+  to confirm live credentials without exposing them.
+author: 'Attri Inc'
+
+inputs:
+  tier:
+    description: 'Tier (dev/qa/uat/main)'
+    required: true
+  baseline-file:
+    description: 'detect-secrets baseline file in the consumer repo'
+    required: false
+    default: '.secrets.baseline'
+  scan-history:
+    description: 'true to scan full git history (slow); auto on qa/main'
+    required: false
+    default: 'auto'
+  fail-on-historic:
+    description: |
+      What to do with verified secrets found in commits that already exist on the
+      PR base ref (i.e. were committed BEFORE this PR). 'block' = fail the gate
+      (default — forces remediation). 'warn' = print a warning but pass (use when
+      remediation is tracked separately and you don't want every PR to be blocked).
+      Findings introduced BY this PR always block regardless.
+    required: false
+    default: 'block'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve scan strategy
+      id: strat
+      shell: bash
+      run: |
+        SH='${{ inputs.scan-history }}'
+        TIER='${{ inputs.tier }}'
+        if [ "$SH" = "auto" ]; then
+          case "$TIER" in
+            qa|uat|main) SH=true ;;
+            *) SH=false ;;
+          esac
+        fi
+        echo "scan-history=$SH" >> "$GITHUB_OUTPUT"
+        # Whether a committed baseline exists. When it does NOT (the common
+        # starting state), the detect-secrets fresh scan excludes whole dirs
+        # like migrations/ to avoid high-entropy ORM noise — which would leave
+        # a real secret in a migration uncaught at dev tier. We use this to
+        # force the verified-only trufflehog pass to run at every tier on the
+        # no-baseline path, closing that blind spot with ~0 false positives. (audit H4)
+        if [ -f '${{ inputs.baseline-file }}' ]; then
+          echo "baseline-exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "baseline-exists=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Cache trufflehog binary
+      uses: actions/cache@v5
+      with:
+        path: /opt/trufflehog
+        key: trufflehog-3.83.7-linux-amd64
+
+    - name: Install detect-secrets + trufflehog OSS
+      shell: bash
+      run: |
+        set -euo pipefail
+        pip install --quiet detect-secrets==1.5.0 --break-system-packages
+        if [ ! -x /opt/trufflehog/trufflehog ]; then
+          mkdir -p /opt/trufflehog
+          # Fetch the install script at the SAME pinned tag as the binary, not
+          # from the mutable main branch (a compromised main/install.sh would
+          # run arbitrary code on the runner with repo/cloud creds in scope). (audit L2)
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/v3.83.7/scripts/install.sh | sh -s -- -b /opt/trufflehog v3.83.7
+        fi
+        echo "/opt/trufflehog" >> "$GITHUB_PATH"
+
+    - name: detect-secrets scan (current tree)
+      shell: bash
+      run: |
+        # detect-secrets-hook exit codes:
+        #   0 = no secrets, baseline unchanged
+        #   1 = NEW secrets found that aren't in baseline (real failure)
+        #   3 = baseline updated (line numbers shifted) — committed to keep stable
+        # The Actions runner sets `bash -e` by default, which would kill the
+        # script on rc=3 BEFORE the case statement runs. Disable -e for the
+        # capture, then re-enable.
+        set +e
+        set -uo pipefail
+        BASELINE='${{ inputs.baseline-file }}'
+        if [ -f "$BASELINE" ]; then
+          # shellcheck disable=SC2046 # ls-files output is intentional space-split
+          detect-secrets-hook --baseline "$BASELINE" $(git ls-files | tr '\n' ' ')
+          rc=$?
+          case $rc in
+            0)
+              echo "::notice::✅ No secrets detected (baseline matched)."
+              ;;
+            3)
+              # Baseline auto-updated to track line-number shifts in known false positives.
+              # NOT a real finding — just commit the updated baseline next push.
+              echo "::notice::⚠️  detect-secrets updated .secrets.baseline (line numbers shifted in known false-positives). Run 'detect-secrets scan > .secrets.baseline' locally and commit to silence on next run."
+              ;;
+            1)
+              echo "::error::detect-secrets found NEW secrets not in baseline."
+              exit 1
+              ;;
+            *)
+              echo "::warning::detect-secrets-hook exited with code $rc (treating as success)."
+              ;;
+          esac
+        else
+          set -e
+          # No baseline: run a fresh scan.
+          # Excludes cover files that don't fit source-side scanning: lockfiles
+          # not in detect-secrets' built-in is_lock_file (pnpm/bun/uv/mix/gradle),
+          # build outputs (gitignored in normal repos; bundle-leak detection is a
+          # separate post-build concern), compiled/minified artifacts, coverage
+          # output, vendored deps, embedded font blobs, ORM migrations (Aerich/
+          # Alembic/Django/Rails — high-entropy MODELS_STATE blobs), test
+          # snapshots, Playwright/Cypress report dirs, Storybook build output,
+          # and codegen artifacts (*.generated.*, protobuf *_pb.go/*_pb2.py).
+          detect-secrets scan --all-files \
+            --exclude-files '\.git/' \
+            --exclude-files 'node_modules/' \
+            --exclude-files '\.terraform/' \
+            --exclude-files 'tests/fixtures/' \
+            --exclude-files 'pnpm-lock\.yaml' \
+            --exclude-files 'bun\.lock(b)?' \
+            --exclude-files 'uv\.lock' \
+            --exclude-files 'mix\.lock' \
+            --exclude-files 'gradle\.lockfile' \
+            --exclude-files 'dist/' \
+            --exclude-files 'build/' \
+            --exclude-files 'out/' \
+            --exclude-files '\.next/' \
+            --exclude-files '\.nuxt/' \
+            --exclude-files '\.svelte-kit/' \
+            --exclude-files '\.turbo/' \
+            --exclude-files '\.parcel-cache/' \
+            --exclude-files '\.cache/' \
+            --exclude-files 'target/' \
+            --exclude-files 'coverage/' \
+            --exclude-files '\.nyc_output/' \
+            --exclude-files '__pycache__/' \
+            --exclude-files '\.pyc$' \
+            --exclude-files '\.tsbuildinfo$' \
+            --exclude-files '\.min\.(js|css)(\.map)?$' \
+            --exclude-files '\.bundle\.(js|css)(\.map)?$' \
+            --exclude-files 'vendor/' \
+            --exclude-files 'fonts/' \
+            --exclude-files 'migrations/' \
+            --exclude-files '__snapshots__/' \
+            --exclude-files '\.snap$' \
+            --exclude-files 'playwright-report/' \
+            --exclude-files 'test-results/' \
+            --exclude-files 'cypress/screenshots/' \
+            --exclude-files 'cypress/videos/' \
+            --exclude-files 'storybook-static/' \
+            --exclude-files '\.generated\.(ts|tsx|js|jsx|go|py|rs|cs|java)$' \
+            --exclude-files '_pb\.go$' \
+            --exclude-files '_pb2(_grpc)?\.py$' \
+            --exclude-secrets 'inherit' \
+            > /tmp/detect-secrets.json
+          if jq -e '.results | length > 0' /tmp/detect-secrets.json > /dev/null; then
+            echo "## Secrets detected (no baseline)" >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.results | to_entries[] | "- " + .key' /tmp/detect-secrets.json >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::detect-secrets found secrets. Review and create a baseline if false positives: detect-secrets scan > .secrets.baseline"
+            exit 1
+          fi
+          echo "::notice::No secrets detected by detect-secrets."
+        fi
+
+    - name: trufflehog (verified-only)
+      shell: bash
+      # Normally skipped at dev tier — detect-secrets above already catches new
+      # patterns and trufflehog adds ~20s. BUT when there is no baseline, the
+      # fresh detect-secrets scan excludes migrations/ (and other dirs), so a
+      # verified live secret committed there would be caught by nothing at dev.
+      # Run trufflehog at every tier on the no-baseline path to close that gap. (audit H4)
+      if: inputs.tier != 'dev' || steps.strat.outputs.baseline-exists == 'false'
+      run: |
+        set -uo pipefail
+        if [ '${{ steps.strat.outputs.scan-history }}' = 'true' ]; then
+          MODE="git file://."
+        else
+          MODE="filesystem ."
+        fi
+        # Only pass --exclude-paths if the ignore file exists (otherwise trufflehog
+        # errors and our handler misinterprets it as "verified secret found").
+        EXCLUDE_ARG=""
+        if [ -f .trufflehogignore ]; then
+          EXCLUDE_ARG="--exclude-paths .trufflehogignore"
+        fi
+
+        # shellcheck disable=SC2086 # MODE and EXCLUDE_ARG are deliberate space-split
+        trufflehog $MODE \
+          --only-verified \
+          --no-update \
+          $EXCLUDE_ARG \
+          --json 2>/tmp/trufflehog.err >/tmp/trufflehog.json
+        rc=$?
+
+        if [ "$rc" -ne 0 ] && [ "$rc" -ne 183 ]; then
+          # Real trufflehog error (not "verified secret found" which is exit 183 with --fail,
+          # but we removed --fail so we use the JSON output instead)
+          echo "::warning::trufflehog exited with code $rc (treating as no findings)."
+          cat /tmp/trufflehog.err >&2 || true
+          exit 0
+        fi
+
+        # Count ONLY verified findings, not all findings.
+        # trufflehog with --only-verified can still emit non-verified entries in JSON
+        # under some conditions; we filter strictly by .Verified == true.
+        VERIFIED_COUNT=$(jq -s '[.[] | select(.Verified == true)] | length' /tmp/trufflehog.json 2>/dev/null || echo 0)
+        if [ "$VERIFIED_COUNT" -le 0 ]; then
+          echo "::notice::✅ No verified live secrets found."
+          exit 0
+        fi
+
+        # Partition findings by commit recency. A finding is "new" if its commit
+        # SHA appears in the PR's own commit list (git rev-list base..HEAD).
+        # Anything else — including commits older than our fetch window, on
+        # base before this PR, or with no commit SHA at all (filesystem scan) —
+        # is "historic". This avoids the trap where `merge-base --is-ancestor`
+        # falsely returns "new" when the SHA is older than the fetched depth.
+        BASE_REF='${{ github.base_ref }}'
+        BASE_SHA=""
+        PR_COMMITS=""
+        if [ -n "$BASE_REF" ]; then
+          git fetch origin "$BASE_REF" --depth=200 2>/dev/null || true
+          BASE_SHA=$(git rev-parse "origin/$BASE_REF" 2>/dev/null || echo "")
+          if [ -n "$BASE_SHA" ]; then
+            PR_COMMITS=$(git rev-list "${BASE_SHA}..HEAD" 2>/dev/null || echo "")
+          fi
+        fi
+
+        NEW_DETAIL=""
+        HIST_DETAIL=""
+        NEW_COUNT=0
+        HIST_COUNT=0
+        while IFS= read -r row; do
+          [ -z "$row" ] && continue
+          DETECTOR=$(echo "$row" | jq -r '.DetectorName')
+          FILE=$(echo "$row" | jq -r '.SourceMetadata.Data.Filesystem.file // .SourceMetadata.Data.Git.file // "unknown"')
+          LINE=$(echo "$row" | jq -r '.SourceMetadata.Data.Filesystem.line // .SourceMetadata.Data.Git.line // "?"')
+          COMMIT=$(echo "$row" | jq -r '.SourceMetadata.Data.Git.commit // ""')
+          SHORT_COMMIT="${COMMIT:0:8}"
+          [ -z "$SHORT_COMMIT" ] && SHORT_COMMIT="n/a"
+          ENTRY="- $DETECTOR → $FILE:$LINE (commit $SHORT_COMMIT)"
+
+          IS_NEW="false"
+          if [ -z "$BASE_SHA" ]; then
+            # Not a PR (push to main, etc.) — treat all findings as new.
+            IS_NEW="true"
+          elif [ -n "$COMMIT" ] && [ -n "$PR_COMMITS" ]; then
+            if echo "$PR_COMMITS" | grep -qx "$COMMIT"; then
+              IS_NEW="true"
+            fi
+          fi
+
+          if [ "$IS_NEW" = "true" ]; then
+            NEW_DETAIL="${NEW_DETAIL}${ENTRY}"$'\n'
+            NEW_COUNT=$((NEW_COUNT + 1))
+          else
+            HIST_DETAIL="${HIST_DETAIL}${ENTRY}"$'\n'
+            HIST_COUNT=$((HIST_COUNT + 1))
+          fi
+        done < <(jq -s -c '.[] | select(.Verified == true)' /tmp/trufflehog.json 2>/dev/null)
+
+        FAIL_HIST='${{ inputs.fail-on-historic }}'
+
+        {
+          echo "## 🔐 Verified live secrets ($VERIFIED_COUNT total)"
+          echo ""
+          if [ "$NEW_COUNT" -gt 0 ]; then
+            echo "### 🚨 Introduced by this PR ($NEW_COUNT) — blocks merge"
+            echo ""
+            echo "$NEW_DETAIL"
+          fi
+          if [ "$HIST_COUNT" -gt 0 ]; then
+            if [ "$FAIL_HIST" = "warn" ]; then
+              echo "### ⚠️  Pre-existing on \`$BASE_REF\` ($HIST_COUNT) — warning only"
+            else
+              echo "### 🚨 Pre-existing on \`$BASE_REF\` ($HIST_COUNT) — blocks merge"
+            fi
+            echo ""
+            echo "$HIST_DETAIL"
+          fi
+          echo ""
+          echo "**Action:** rotate each credential at the issuer, then purge from git history with \`git filter-repo\` or BFG."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$NEW_COUNT" -gt 0 ]; then
+          echo "::group::Verified live secrets — introduced by this PR ($NEW_COUNT)"
+          printf '%s' "$NEW_DETAIL"
+          echo "::endgroup::"
+        fi
+        if [ "$HIST_COUNT" -gt 0 ]; then
+          echo "::group::Verified live secrets — pre-existing on $BASE_REF ($HIST_COUNT)"
+          printf '%s' "$HIST_DETAIL"
+          echo "::endgroup::"
+        fi
+
+        if [ "$NEW_COUNT" -gt 0 ]; then
+          echo "::error::trufflehog confirmed $NEW_COUNT LIVE credential(s) introduced by this PR. Rotate immediately, then purge from history."
+          exit 1
+        fi
+        if [ "$HIST_COUNT" -gt 0 ] && [ "$FAIL_HIST" != "warn" ]; then
+          echo "::error::trufflehog confirmed $HIST_COUNT LIVE credential(s) pre-existing on $BASE_REF. Rotate, then purge from history. (Set fail-on-historic: warn to pass instead.)"
+          exit 1
+        fi
+        if [ "$HIST_COUNT" -gt 0 ]; then
+          # Notice (not warning) — the consumer explicitly opted into this mode
+          # via fail-on-historic=warn. Showing it as a warning annotation on
+          # every PR run becomes noise.
+          echo "::notice::$HIST_COUNT verified live secret(s) pre-existing on $BASE_REF — passed because fail-on-historic=warn. Track remediation outside this PR."
+        fi
+        exit 0

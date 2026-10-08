@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Attri-Inc/dev-kit/security/advisories/new
+    about: Report a vulnerability privately (do NOT use public issues)
+  - name: Discussions
+    url: https://github.com/Attri-Inc/dev-kit/discussions
+    about: Ask a question or share onboarding tips

@@ -1,0 +1,48 @@
+name: Bug report
+description: A check fires when it shouldn't, or fails when it should pass
+title: "[bug] "
+labels: [bug, needs-triage]
+body:
+  - type: input
+    id: kit-version
+    attributes:
+      label: Kit version
+      description: The kit commit SHA your run used, or "main"
+      placeholder: main
+    validations:
+      required: true
+  - type: input
+    id: repo
+    attributes:
+      label: Consumer repo
+      description: Link to the repo, if it is public
+    validations:
+      required: false
+  - type: input
+    id: tier
+    attributes:
+      label: Tier
+      description: dev / qa / uat / main
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: input
+    id: run-link
+    attributes:
+      label: Failed run URL
+      placeholder: https://github.com/<owner>/<repo>/actions/runs/<id>
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else

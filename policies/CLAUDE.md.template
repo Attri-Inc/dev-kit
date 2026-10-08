@@ -1,0 +1,82 @@
+# CLAUDE.md
+<!-- Drop this template into any repo at the root and customize. Claude Code, Cursor, and other AI tools read it. -->
+<!-- Companion: also add an AGENTS.md symlink so Codex CLI / Aider see the same content. -->
+
+## Project Overview
+
+> **One sentence:** what this repo is and who uses it.
+
+> **Stack:** language(s), framework(s), database, deployment target.
+
+> **Status:** active / maintenance / deprecated.
+
+## Critical Conventions (do NOT change without team approval)
+
+- **Branch model:** `dev` → `qa` → `main`. Never push directly to any of these.
+- **Commit messages:** Conventional Commits (`feat:`/`fix:`/`docs:`/...).
+- **AI-authored commits MUST include:** `Co-Authored-By: Claude <noreply@anthropic.com>`
+- **Identity:** `git config user.email` MUST be on your org's domain (`<your-domain>`). No personal Gmail, no `*.local`.
+- **Tests:** required for every behavior-changing PR (≥20 prod lines = test required).
+- **Secrets:** never in source tree. Use your secret manager / GH Actions secrets via OIDC.
+- **Migrations:** no `DROP TABLE`/`ALTER ... NOT NULL` without DBA approval label.
+
+## What This Repo Does Differently
+
+> Things that surprised the AI on first contact. Examples:
+> - "We use `pyproject.toml`+`uv` not requirements.txt"
+> - "Our auth lives in `src/middleware/auth.ts` — never inline it elsewhere"
+> - "Tests live in `apps/<service>/tests/`, not at repo root"
+> - "We deploy via GH Environments → production with manual approval"
+
+## Build / Test / Lint
+
+```bash
+# Build
+<command>
+
+# Test (full)
+<command>
+
+# Test (single file)
+<command>
+
+# Lint + format
+<command>
+
+# Type check
+<command>
+```
+
+## File Layout
+
+```
+.
+├── src/                # what
+├── tests/              # what
+├── infra/              # what
+└── docs/               # what
+```
+
+## Hot Spots (be extra careful here)
+
+- **`src/auth/`** — never bypass middleware, never disable MFA "for testing"
+- **`migrations/`** — see migration-safety policy
+- **`.env.example`** — sample only; real secrets via your secret manager
+- **`infra/terraform/`** — `terraform plan` PR comment required before apply
+
+## Don't Do These
+
+- Don't commit `.env`, `*.pem`, `*.key`, `credentials*.json`, `token.pickle`, `*.sqlite*`
+- Don't add `try/except: pass` or `catch (_) {}` — handle the error or remove the try
+- Don't suggest a package without verifying it exists on the registry (slopsquat defense)
+- Don't create new files when the right place is an existing file (search first)
+- Don't `git push --force` to any shared branch
+- Don't run `--dangerously-skip-permissions` outside a sandboxed container
+
+## When You're Stuck
+
+Run the failing test, read the error, then read the most recent 3 git log entries on the affected file. If still stuck, leave a TODO with `// TODO(claude): <question>` and ship a partial PR for human review.
+
+## attri-dev-kit Gate
+
+This repo is gated by `Attri-Inc/dev-kit` at `.github/workflows/attri-dev-kit.yml`. If a check fails, fix the underlying issue — do not disable the check.

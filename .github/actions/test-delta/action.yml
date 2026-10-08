@@ -1,0 +1,125 @@
+name: 'Test delta gate'
+description: |
+  Fails the PR if it adds N+ production code lines without adding/touching test files.
+  Forces AI (and humans) to ship tests with code.
+  Audit found 14/15 repos in batch AA have NO tests at all — this prevents regression
+  to that baseline once kit-led tests start landing.
+author: 'Attri Inc'
+
+inputs:
+  min-prod-lines:
+    description: 'Minimum production-code lines added before test requirement kicks in'
+    required: false
+    default: '20'
+  fail-on-missing:
+    description: 'true to fail the build; false to warn only'
+    required: false
+    default: 'true'
+  skip:
+    description: |
+      'true' bypasses the gate entirely (passes with a notice). Set from the
+      consumer CI wrapper (skip-test-delta) for repos that opt out of the
+      test-delta requirement without per-PR labelling.
+    required: false
+    default: 'false'
+  bypass-label:
+    description: |
+      PR label that bypasses the gate when applied. Defaults to
+      'tests-not-needed'; override to match an existing repo label.
+    required: false
+    default: 'tests-not-needed'
+
+runs:
+  using: 'composite'
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        BASE: ${{ github.base_ref }}
+        MIN_LINES: ${{ inputs.min-prod-lines }}
+        FAIL: ${{ inputs.fail-on-missing }}
+        SKIP: ${{ inputs.skip }}
+        # Bypass label name. Read via env (not inline interpolation) so a
+        # crafted value can't break bash quoting or inject shell.
+        BYPASS_LABEL: ${{ inputs.bypass-label }}
+        # Pass labels via env (not inline interpolation) so JSON quotes
+        # and arbitrary label-name characters can never break bash quoting
+        # or inject shell. Empty-string when not a PR event.
+        PR_LABELS_JSON: ${{ github.event_name == 'pull_request' && toJson(github.event.pull_request.labels) || '[]' }}
+        EVENT_NAME: ${{ github.event_name }}
+      run: |
+        set -euo pipefail
+        if [ "${SKIP:-false}" = "true" ]; then
+          echo "::notice::test-delta bypassed via skip-test-delta (CI wrapper opt-out)."
+          exit 0
+        fi
+        if [ -z "${BASE:-}" ]; then
+          echo "::notice::Not a PR — skipping test-delta."
+          exit 0
+        fi
+        git fetch origin "$BASE" --depth=50 2>/dev/null || true
+
+        PROD_GLOBS=(
+          '*.py' '*.js' '*.jsx' '*.ts' '*.tsx' '*.go' '*.java' '*.cs' '*.rb'
+          ':(exclude)tests/**' ':(exclude)test/**' ':(exclude)**/tests/**' ':(exclude)**/test/**'
+          ':(exclude)*_test.go' ':(exclude)*.test.*' ':(exclude)*.spec.*'
+          ':(exclude)__tests__/**' ':(exclude)cypress/**' ':(exclude)e2e/**' ':(exclude)playwright/**'
+          ':(exclude)docs/**' ':(exclude)*.md'
+          ':(exclude)package-lock.json' ':(exclude)*.lock' ':(exclude)*.min.js'
+          ':(exclude).github/**'
+        )
+
+        TEST_GLOBS=(
+          'tests/**' 'test/**' '**/tests/**' '**/test/**'
+          '*_test.go' '*.test.*' '*.spec.*'
+          '__tests__/**' 'cypress/**' 'e2e/**' 'playwright/**'
+          '*Test.java' '*Tests.cs'
+        )
+
+        # Sum of added lines on production paths
+        PROD_ADDED=0
+        while read -r adds dels _f; do
+          [ "$adds" = "-" ] && adds=0
+          PROD_ADDED=$((PROD_ADDED + adds))
+        done < <(git diff --numstat "origin/${BASE}...HEAD" -- "${PROD_GLOBS[@]}" 2>/dev/null)
+
+        TEST_FILES_TOUCHED=$(git diff --name-only "origin/${BASE}...HEAD" -- "${TEST_GLOBS[@]}" 2>/dev/null | wc -l | tr -d ' ')
+
+        echo "Production lines added: $PROD_ADDED"
+        echo "Test files touched: $TEST_FILES_TOUCHED"
+
+        if [ "$PROD_ADDED" -ge "$MIN_LINES" ] && [ "$TEST_FILES_TOUCHED" -eq 0 ]; then
+          {
+            echo "## ❌ Test delta gate failed"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---:|"
+            echo "| Production lines added | $PROD_ADDED |"
+            echo "| Test files touched | 0 |"
+            echo "| Threshold | $MIN_LINES |"
+            echo ""
+            echo "Adding production code without tests means AI has no behavior contract to honor on the next iteration. Add at least one test that exercises the new code path."
+            echo ""
+            echo "If this PR genuinely needs no tests (docs, config, dependency bump, generated code), apply the \`${BYPASS_LABEL}\` label and the gate will pass."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Honor escape-hatch label. Read labels from env (set above) to
+          # avoid bash-quoting breakage and shell injection from crafted
+          # label names. `printf '%s'` + stdin keeps the JSON intact.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            labels=$(printf '%s' "$PR_LABELS_JSON" | jq -r '.[].name' 2>/dev/null || echo "")
+            if printf '%s\n' "$labels" | grep -qxF -- "$BYPASS_LABEL"; then
+              echo "::notice::${BYPASS_LABEL} label applied — gate skipped."
+              exit 0
+            fi
+          fi
+
+          if [ "$FAIL" = "true" ]; then
+            echo "::error::test-delta: $PROD_ADDED prod lines added, 0 test files touched."
+            exit 1
+          else
+            echo "::warning::test-delta: $PROD_ADDED prod lines added, 0 test files touched (warn-only mode)."
+          fi
+        else
+          echo "::notice::✅ Test delta OK ($PROD_ADDED prod lines, $TEST_FILES_TOUCHED test files touched)."
+        fi

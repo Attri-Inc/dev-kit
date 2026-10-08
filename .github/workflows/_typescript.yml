@@ -1,0 +1,405 @@
+name: _typescript
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner for jobs (default ubuntu-latest; set self-hosted to use your own runners).'
+        type: string
+        default: 'ubuntu-latest'
+      tier:
+        type: string
+        required: true
+      run-medium:
+        type: string
+        default: 'false'
+      fail-on:
+        type: string
+        default: 'high'
+      node-version:
+        type: string
+        default: '20'
+      diff-coverage-min:
+        description: 'Minimum % of CHANGED lines that must be covered by tests (patch coverage).'
+        type: string
+        default: '80'
+      diff-coverage-enforcement:
+        description: 'warn (advisory, default) | fail (block PRs below diff-coverage-min).'
+        type: string
+        default: 'warn'
+      frontend-quality-enforcement:
+        description: |
+          Lighthouse (perf + a11y + CWV) and bundle-size budgets: 'warn' (default)
+          | 'fail'. Consume-if-present (runs only when a lighthouserc / size-limit
+          / bundlewatch config exists).
+        type: string
+        default: 'warn'
+      test-os:
+        description: 'JSON array of runner OSes for the test matrix. Default ["ubuntu-latest"].'
+        type: string
+        default: '["ubuntu-latest"]'
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  detect-tooling:
+    name: Detect tooling
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      use-biome: ${{ steps.detect.outputs.use-biome }}
+      package-manager: ${{ steps.detect.outputs.pm }}
+      has-tsconfig: ${{ steps.detect.outputs.has-tsconfig }}
+      has-tests: ${{ steps.detect.outputs.has-tests }}
+      has-build: ${{ steps.detect.outputs.has-build }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: detect
+        shell: bash
+        run: |
+          if [ -f pnpm-lock.yaml ]; then echo "pm=pnpm" >> "$GITHUB_OUTPUT"
+          elif [ -f yarn.lock ]; then echo "pm=yarn" >> "$GITHUB_OUTPUT"
+          else echo "pm=npm" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f biome.json ] || [ -f biome.jsonc ]; then
+            echo "use-biome=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "use-biome=false" >> "$GITHUB_OUTPUT"
+          fi
+          [ -f tsconfig.json ] && echo "has-tsconfig=true" >> "$GITHUB_OUTPUT" || echo "has-tsconfig=false" >> "$GITHUB_OUTPUT"
+          if grep -qE '"(test|jest|vitest)"' package.json 2>/dev/null; then
+            echo "has-tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-tests=false" >> "$GITHUB_OUTPUT"
+          fi
+          if grep -qE '"build"\s*:' package.json 2>/dev/null; then
+            echo "has-build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  lint-biome:
+    name: Lint + format (Biome)
+    if: needs.detect-tooling.outputs.use-biome == 'true'
+    needs: detect-tooling
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: biomejs/setup-biome@v2
+      - run: biome ci .
+
+  lint-eslint:
+    name: Lint (ESLint)
+    if: needs.detect-tooling.outputs.use-biome != 'true'
+    needs: detect-tooling
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup pnpm
+        # actions/setup-node@v6 with `cache: pnpm` calls pnpm to resolve the
+        # cache directory; without pnpm on PATH it fails with "Unable to
+        # locate executable file: pnpm". npm and yarn are pre-installed on
+        # GitHub-hosted Ubuntu runners, so we only need to set up pnpm.
+        if: needs.detect-tooling.outputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ needs.detect-tooling.outputs.package-manager }}
+      - name: Install
+        # --ignore-scripts: lint doesn't need lifecycle scripts, and these
+        # postinstall hooks are where supply-chain credential stealers run
+        # (the gate inherits secrets). The test job keeps scripts enabled.
+        #
+        # No `corepack enable`: pnpm/action-setup above has already put the
+        # repo's pnpm on PATH, and the shim corepack installs shadows it with
+        # one that resolves `bin/pnpm.cjs` — pnpm 10's layout. pnpm 11 renamed
+        # it to `bin/pnpm.mjs` and pnpm 12 to `pnpm`, so every repo on pnpm 11+
+        # died here with "Cannot find module .../bin/pnpm.cjs" before running a
+        # single check. corepack was redundant on this path either way.
+        run: |
+          case "${{ needs.detect-tooling.outputs.package-manager }}" in
+            pnpm) pnpm install --frozen-lockfile --ignore-scripts ;;
+            yarn) yarn install --frozen-lockfile --ignore-scripts ;;
+            npm)  npm ci --ignore-scripts ;;
+          esac
+      - name: Codegen (first-party generators)
+        # --ignore-scripts skips the postinstall hook that generators like
+        # Prisma run from, so type-aware lint rules can't resolve the generated
+        # client. Re-run only known first-party generators by name.
+        uses: Attri-Inc/dev-kit/.github/actions/js-codegen@main
+      - name: Run ESLint
+        # Prefer the project's own `lint` script so we use whatever ESLint
+        # version + config the repo pins (works for ESLint 8 legacy config
+        # AND ESLint 9 flat config). Fall back to a direct `eslint .` only if
+        # no script exists. Avoids the reviewdog wrapper, which broke on
+        # ESLint 9 (the `--ext` flag was removed and the bundled rdjson
+        # formatter no longer parses cleanly).
+        shell: bash
+        run: |
+          PM='${{ needs.detect-tooling.outputs.package-manager }}'
+          HAS_LINT=$(jq -r '.scripts.lint // empty' package.json 2>/dev/null)
+          if [ -n "$HAS_LINT" ]; then
+            echo "::notice::Running consumer's \`$PM run lint\` (script: $HAS_LINT)"
+            case "$PM" in
+              pnpm) pnpm run lint ;;
+              yarn) yarn lint ;;
+              npm)  npm run lint ;;
+            esac
+          else
+            echo "::notice::No \`lint\` npm script — falling back to \`npx eslint .\`"
+            npx --yes eslint .
+          fi
+
+  type-check:
+    name: Type check (tsc)
+    if: needs.detect-tooling.outputs.has-tsconfig == 'true'
+    needs: detect-tooling
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup pnpm
+        # actions/setup-node@v6 with `cache: pnpm` calls pnpm to resolve the
+        # cache directory; without pnpm on PATH it fails with "Unable to
+        # locate executable file: pnpm". npm and yarn are pre-installed on
+        # GitHub-hosted Ubuntu runners, so we only need to set up pnpm.
+        if: needs.detect-tooling.outputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ needs.detect-tooling.outputs.package-manager }}
+      - name: Install
+        # --ignore-scripts: type-check needs no lifecycle scripts. See ESLint job.
+        run: |
+          case "${{ needs.detect-tooling.outputs.package-manager }}" in
+            pnpm) pnpm install --frozen-lockfile --ignore-scripts ;;
+            yarn) yarn install --frozen-lockfile --ignore-scripts ;;
+            npm)  npm ci --ignore-scripts ;;
+          esac
+      - name: Codegen (first-party generators)
+        # --ignore-scripts skips the postinstall hook that generators like
+        # Prisma run from, so tsc can't resolve the generated client and fails
+        # with TS2305/TS7006. Re-run only known first-party generators by name.
+        uses: Attri-Inc/dev-kit/.github/actions/js-codegen@main
+      - name: tsc --noEmit
+        run: npx --no-install tsc --noEmit
+
+  security:
+    name: Security (Semgrep CLI)
+    if: inputs.run-medium == 'true'
+    needs: detect-tooling
+    runs-on: ${{ inputs.runner }}
+    # Semgrep is a plain Python package, so it is installed rather than run via
+    # `container: semgrep/semgrep`. Running the job inside that image required a
+    # Docker daemon on the runner, and self-hosted runners get a fresh, empty
+    # dind per job — so every run re-pulled the image (~22s) for no benefit.
+    steps:
+      - uses: actions/checkout@v6
+      # Self-hosted runner images ship Semgrep preinstalled at the pinned
+      # version. Detect that first so the install steps (including setup-python,
+      # which the GitHub-hosted fallback needs for a usable pip) are skipped
+      # entirely on the fast path.
+      - name: Check for Semgrep
+        id: semgrep
+        shell: bash
+        env:
+          WANT: '1.97.0'
+        run: |
+          set -uo pipefail
+          have="$(semgrep --version 2>/dev/null | head -1 || true)"
+          if [ "$have" = "$WANT" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Semgrep ${WANT} preinstalled — skipping install."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Semgrep ${WANT} not present (found: ${have:-none}) — installing."
+          fi
+      - uses: actions/setup-python@v6
+        if: steps.semgrep.outputs.present != 'true'
+        with:
+          python-version: '3.12'
+      - name: Install Semgrep
+        if: steps.semgrep.outputs.present != 'true'
+        run: pip install --disable-pip-version-check semgrep==1.97.0
+      - name: Run Semgrep
+        run: |
+          semgrep scan \
+            --config p/javascript --config p/typescript \
+            --config p/owasp-top-ten --config p/nodejs \
+            --sarif --output=semgrep.sarif \
+            --error || true
+      - uses: github/codeql-action/upload-sarif@v4
+        # Private repos without GHAS can't upload SARIF — don't block the gate.
+        continue-on-error: true
+        if: always() && hashFiles('semgrep.sarif') != '' && !github.event.repository.private
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  deps-vulns:
+    name: Dependency vulns (npm audit + osv)
+    if: inputs.run-medium == 'true'
+    needs: detect-tooling
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup pnpm
+        # actions/setup-node@v6 with `cache: pnpm` calls pnpm to resolve the
+        # cache directory; without pnpm on PATH it fails with "Unable to
+        # locate executable file: pnpm". npm and yarn are pre-installed on
+        # GitHub-hosted Ubuntu runners, so we only need to set up pnpm.
+        if: needs.detect-tooling.outputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ needs.detect-tooling.outputs.package-manager }}
+      - name: Install
+        # --ignore-scripts: auditing the dep tree needs no lifecycle scripts. See ESLint job.
+        run: |
+          case "${{ needs.detect-tooling.outputs.package-manager }}" in
+            pnpm) pnpm install --frozen-lockfile --ignore-scripts ;;
+            yarn) yarn install --frozen-lockfile --ignore-scripts ;;
+            npm)  npm ci --ignore-scripts ;;
+          esac
+      - name: npm audit
+        run: |
+          case "${{ needs.detect-tooling.outputs.package-manager }}" in
+            pnpm) pnpm audit --prod --audit-level=high ;;
+            yarn) yarn audit --groups dependencies --level high ;;
+            npm)  npm audit --omit=dev --audit-level=high ;;
+          esac
+        continue-on-error: ${{ inputs.fail-on != 'critical' }}
+
+  test:
+    name: Test
+    if: needs.detect-tooling.outputs.has-tests == 'true'
+    needs: detect-tooling
+    # Cross-OS opt-in (default ubuntu = unchanged); add macos/windows for
+    # portability-sensitive packages. fail-fast off. (cross-OS P1)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.test-os) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Setup pnpm
+        # actions/setup-node@v6 with `cache: pnpm` calls pnpm to resolve the
+        # cache directory; without pnpm on PATH it fails with "Unable to
+        # locate executable file: pnpm". npm and yarn are pre-installed on
+        # GitHub-hosted Ubuntu runners, so we only need to set up pnpm.
+        if: needs.detect-tooling.outputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ needs.detect-tooling.outputs.package-manager }}
+      - name: Install
+        shell: bash   # Windows runners default to PowerShell; these are bash scripts
+        run: |
+          case "${{ needs.detect-tooling.outputs.package-manager }}" in
+            pnpm) pnpm install --frozen-lockfile ;;
+            yarn) yarn install --frozen-lockfile ;;
+            npm)  npm ci ;;
+          esac
+      - name: Run tests
+        shell: bash
+        run: |
+          case "${{ needs.detect-tooling.outputs.package-manager }}" in
+            pnpm) pnpm test --if-present ;;
+            yarn) yarn test ;;
+            npm)  npm test --if-present ;;
+          esac
+      # Consume-if-present: the repo's test script may emit a coverage report
+      # (jest/vitest with an lcov or cobertura reporter). We gate on it if found,
+      # else nudge — we do NOT force coverage flags onto an unknown runner, which
+      # would risk breaking the test step. (SSoT catalog: Testing P0; warn-first)
+      # Coverage detection + gate run ONCE (on Linux), not per matrix OS.
+      - name: Locate coverage report
+        id: cov
+        if: github.event_name == 'pull_request' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          if [ -f coverage/lcov.info ]; then
+            echo "report=coverage/lcov.info" >> "$GITHUB_OUTPUT"
+            echo "format=lcov" >> "$GITHUB_OUTPUT"
+          elif [ -f coverage/cobertura-coverage.xml ]; then
+            echo "report=coverage/cobertura-coverage.xml" >> "$GITHUB_OUTPUT"
+            echo "format=cobertura" >> "$GITHUB_OUTPUT"
+          else
+            echo "report=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No coverage report found (looked for coverage/lcov.info and coverage/cobertura-coverage.xml). Enable coverage in your test runner (e.g. jest --coverage --coverageReporters=lcov, or vitest with coverage.reporter=['lcov']) to activate the patch-coverage gate."
+          fi
+      - uses: actions/setup-python@v6
+        if: steps.cov.outputs.report != ''
+        with:
+          python-version: '3.12'
+      - name: Diff coverage gate
+        if: steps.cov.outputs.report != ''
+        uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
+        with:
+          report: ${{ steps.cov.outputs.report }}
+          format: ${{ steps.cov.outputs.format }}
+          base-ref: ${{ github.base_ref }}
+          min-coverage: ${{ inputs.diff-coverage-min }}
+          enforcement: ${{ inputs.diff-coverage-enforcement }}
+
+  build:
+    name: Build
+    if: needs.detect-tooling.outputs.has-build == 'true' && inputs.run-medium == 'true'
+    needs: detect-tooling
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup pnpm
+        # actions/setup-node@v6 with `cache: pnpm` calls pnpm to resolve the
+        # cache directory; without pnpm on PATH it fails with "Unable to
+        # locate executable file: pnpm". npm and yarn are pre-installed on
+        # GitHub-hosted Ubuntu runners, so we only need to set up pnpm.
+        if: needs.detect-tooling.outputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ needs.detect-tooling.outputs.package-manager }}
+      - name: Install + build
+        run: |
+          case "${{ needs.detect-tooling.outputs.package-manager }}" in
+            pnpm) pnpm install --frozen-lockfile && pnpm build ;;
+            yarn) yarn install --frozen-lockfile && yarn build ;;
+            npm)  npm ci && npm run build ;;
+          esac
+
+  frontend-quality:
+    name: Frontend quality (a11y + perf budgets)
+    # Frontend repos only, qa/main tier. Consume-if-present: the action no-ops
+    # unless a lighthouserc / size-limit / bundlewatch config exists. (SSoT: a11y + perf P0)
+    if: needs.detect-tooling.outputs.has-build == 'true' && inputs.run-medium == 'true'
+    needs: detect-tooling
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup pnpm
+        if: needs.detect-tooling.outputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ needs.detect-tooling.outputs.package-manager }}
+      - name: Install
+        run: |
+          case "${{ needs.detect-tooling.outputs.package-manager }}" in
+            pnpm) pnpm install --frozen-lockfile ;;
+            yarn) yarn install --frozen-lockfile ;;
+            npm)  npm ci ;;
+          esac
+      - uses: Attri-Inc/dev-kit/.github/actions/frontend-quality@main
+        with:
+          enforcement: ${{ inputs.frontend-quality-enforcement }}

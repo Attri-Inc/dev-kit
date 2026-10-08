@@ -1,0 +1,27 @@
+name: Feature request
+description: Add a check, support a language, change a default
+title: "[feat] "
+labels: [enhancement, needs-triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Real failure mode you've seen, ideally with a repo link
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: input
+    id: existing-tool
+    attributes:
+      label: Is there an existing OSS action that does this?
+      description: We strongly prefer wrapping existing tools over building from scratch

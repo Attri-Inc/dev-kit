@@ -1,0 +1,206 @@
+name: 'PR size guard'
+description: 'Fails PRs above a hard line-count limit; warns above a soft limit. Excludes generated files and uses higher limits for promotion PRs (dev→main).'
+author: 'Attri Inc'
+
+inputs:
+  size-weighting:
+    description: |
+      'true' (default) weights each changed line by its language's density before
+      comparing to the limits — verbose languages (Go/Java/Terraform/C#) count
+      less per line than dense ones (Python/TS), since review effort is what the
+      limit models. 'false' compares the raw line count.
+    required: false
+    default: 'true'
+  soft-limit:
+    description: 'Warn threshold (additions + deletions)'
+    required: false
+    default: '400'
+  hard-limit:
+    description: 'Fail threshold (additions + deletions)'
+    required: false
+    default: '600'
+  promotion-soft-limit:
+    description: 'Soft limit for promotion PRs (e.g. dev→main). Higher because promotions batch already-reviewed commits.'
+    required: false
+    default: '1200'
+  promotion-hard-limit:
+    description: 'Hard limit for promotion PRs (e.g. dev→main).'
+    required: false
+    default: '2000'
+  promotion-base-globs:
+    description: 'Newline-separated base-branch globs that count as a promotion target.'
+    required: false
+    default: |
+      main
+      master
+      production
+  promotion-head-globs:
+    description: 'Newline-separated head-branch globs treated as promotions into the above bases.'
+    required: false
+    default: |
+      dev
+      develop
+      development
+      staging
+      release/*
+      hotfix/*
+  ignore-globs:
+    description: 'Newline-separated globs to exclude (lockfiles, generated, docs)'
+    required: false
+    default: |
+      package-lock.json
+      yarn.lock
+      pnpm-lock.yaml
+      poetry.lock
+      Cargo.lock
+      go.sum
+      *.min.js
+      *.min.css
+      *.generated.*
+      *_pb.go
+      *_pb2.py
+      *.snap
+      *.svg
+      *.lock
+      *.md
+      dist/**
+      build/**
+
+runs:
+  using: 'composite'
+  steps:
+    - id: size
+      shell: bash
+      env:
+        # Pass labels via env (not inline interpolation) so JSON quotes
+        # and arbitrary label-name characters can never break bash quoting
+        # or inject shell. Empty array when not a PR event.
+        PR_LABELS_JSON: ${{ github.event_name == 'pull_request' && toJson(github.event.pull_request.labels) || '[]' }}
+        EVENT_NAME: ${{ github.event_name }}
+      run: |
+        set -euo pipefail
+
+        BASE_REF="${GITHUB_BASE_REF:-main}"
+        git fetch origin "$BASE_REF" --depth=50 2>/dev/null || true
+        BASE="origin/$BASE_REF"
+        if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+          BASE=$(git rev-parse HEAD~1)
+        fi
+
+        # Build exclude args from ignore-globs
+        IGNORE='${{ inputs.ignore-globs }}'
+        EXCLUDE_ARGS=()
+        while IFS= read -r pat; do
+          [ -z "$pat" ] && continue
+          EXCLUDE_ARGS+=(":(exclude)$pat")
+        done <<< "$IGNORE"
+
+        # Per-language density weight (percent). Lower = more verbose, so each
+        # line counts less toward the limit (review effort, not raw lines).
+        weight_pct() {
+          case "$1" in
+            *.tf|*.tfvars|*.hcl)                       echo 50 ;;
+            *.go)                                      echo 55 ;;
+            *.java|*.kt|*.kts|*.scala)                 echo 55 ;;
+            *.cs)                                      echo 60 ;;
+            *.yaml|*.yml|*.json|*.xml|*.toml|*.proto)  echo 50 ;;
+            *.html|*.css|*.scss|*.vue|*.svelte)        echo 70 ;;
+            *.js|*.jsx|*.mjs|*.cjs|*.ts|*.tsx)         echo 60 ;;   # JS/TS: effective hard ~1000
+            *.rb|*.php)                                echo 90 ;;
+            *.py|*.rs)                                 echo 100 ;;  # Python: effective hard 600
+            *)                                         echo 100 ;;
+          esac
+        }
+
+        ADDS=0
+        DELS=0
+        WEIGHTED_X100=0
+        FILES_CHANGED=$(git diff --name-only "$BASE...HEAD" -- . "${EXCLUDE_ARGS[@]}" | wc -l | tr -d ' ')
+
+        # numstat: <add> <del> <file>
+        while read -r a d f; do
+          [ "$a" = "-" ] && a=0
+          [ "$d" = "-" ] && d=0
+          ADDS=$((ADDS + a))
+          DELS=$((DELS + d))
+          w=$(weight_pct "$f")
+          WEIGHTED_X100=$((WEIGHTED_X100 + (a + d) * w))
+        done < <(git diff --numstat "$BASE...HEAD" -- . "${EXCLUDE_ARGS[@]}")
+
+        TOTAL=$((ADDS + DELS))
+        WEIGHTED=$((WEIGHTED_X100 / 100))
+        # The figure compared against the limits.
+        if [ "${{ inputs.size-weighting }}" = "true" ]; then
+          EFFECTIVE=$WEIGHTED
+        else
+          EFFECTIVE=$TOTAL
+        fi
+        SOFT=${{ inputs.soft-limit }}
+        HARD=${{ inputs.hard-limit }}
+        PROFILE="standard"
+
+        # Promotion-intent awareness: a PR whose head is an integration branch
+        # (dev/release/...) targeting a release base (main/master) is, by design,
+        # a batch of already-reviewed commits — so the feature-PR limit is the
+        # wrong yardstick. Use the higher promotion limits for those.
+        match_glob() {  # $1 = value, $2 = newline-separated glob list
+          local val="$1" pat
+          [ -z "$val" ] && return 1
+          while IFS= read -r pat; do
+            [ -z "$pat" ] && continue
+            # shellcheck disable=SC2254 # glob match is intentional
+            case "$val" in $pat) return 0 ;; esac
+          done <<< "$2"
+          return 1
+        }
+        if [ "$EVENT_NAME" = "pull_request" ]; then
+          if match_glob "${GITHUB_BASE_REF:-}" '${{ inputs.promotion-base-globs }}' \
+             && match_glob "${GITHUB_HEAD_REF:-}" '${{ inputs.promotion-head-globs }}'; then
+            SOFT=${{ inputs.promotion-soft-limit }}
+            HARD=${{ inputs.promotion-hard-limit }}
+            PROFILE="promotion (${GITHUB_HEAD_REF}→${GITHUB_BASE_REF})"
+            echo "::notice::Promotion PR detected (${GITHUB_HEAD_REF}→${GITHUB_BASE_REF}) — using promotion limits ${SOFT}/${HARD}."
+          fi
+        fi
+
+        {
+          echo "## PR size"
+          echo ""
+          echo "| Metric | Value |"
+          echo "|---|---:|"
+          echo "| Files changed | $FILES_CHANGED |"
+          echo "| Additions | $ADDS |"
+          echo "| Deletions | $DELS |"
+          echo "| Raw total | $TOTAL |"
+          echo "| **Effective (language-weighted)** | **$EFFECTIVE** |"
+          echo "| Weighting | ${{ inputs.size-weighting }} |"
+          echo "| Limit profile | $PROFILE |"
+          echo "| Soft limit | $SOFT |"
+          echo "| Hard limit | $HARD |"
+          echo ""
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$EFFECTIVE" -gt "$HARD" ]; then
+          echo "::error::PR is $EFFECTIVE effective lines (raw $TOTAL; hard limit: $HARD). Split this PR — review quality drops sharply above the limit."
+          {
+            echo "❌ **Hard fail** — PR exceeds $HARD effective lines (raw $TOTAL)."
+            echo ""
+            echo "Split this PR into smaller, reviewable chunks. Apply the \`pr-size: bypass-approved\` label only with explicit owner approval."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Honor escape-hatch label (mirrors test-delta's tests-not-needed).
+          # Labels come from env (PR_LABELS_JSON) — see env: block above for why.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            labels=$(printf '%s' "$PR_LABELS_JSON" | jq -r '.[].name' 2>/dev/null || echo "")
+            if echo "$labels" | grep -qx "pr-size: bypass-approved"; then
+              echo "::notice::pr-size: bypass-approved label applied — hard limit waived for this PR."
+              exit 0
+            fi
+          fi
+
+          exit 1
+        elif [ "$EFFECTIVE" -gt "$SOFT" ]; then
+          echo "::warning::PR is $EFFECTIVE effective lines (raw $TOTAL; soft limit: $SOFT). Consider splitting."
+        else
+          echo "::notice::PR size OK ($EFFECTIVE effective lines, raw $TOTAL)."
+        fi

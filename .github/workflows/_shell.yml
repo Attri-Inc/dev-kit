@@ -1,0 +1,50 @@
+name: _shell
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner for jobs (default ubuntu-latest; set self-hosted to use your own runners).'
+        type: string
+        default: 'ubuntu-latest'
+      tier:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          severity: warning
+
+  shfmt:
+    name: shfmt (format check)
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install shfmt
+        # Old URL hardcoded `shfmt_v3.8.0_linux_amd64` against `latest/download/`
+        # — that 404s because v3.8.0 isn't in the latest release. Resolve the
+        # actual latest tag and download the matching versioned asset.
+        run: |
+          set -euo pipefail
+          TAG=$(curl -sSf https://api.github.com/repos/mvdan/sh/releases/latest | jq -r '.tag_name')
+          sudo curl -sSLo /usr/local/bin/shfmt \
+            "https://github.com/mvdan/sh/releases/download/${TAG}/shfmt_${TAG}_linux_amd64"
+          sudo chmod +x /usr/local/bin/shfmt
+          shfmt --version
+      # shfmt is style enforcement, not correctness — repos vary widely on
+      # indent (tabs vs 2 vs 4) and reformatting legacy scripts on every
+      # onboarding is too aggressive. Always warn-only; real shell bugs are
+      # caught by shellcheck above. Consumers who want strict shfmt can
+      # opt in via their own pre-commit hook with their preferred style.
+      - run: shfmt -d -i 2 -ci .
+        continue-on-error: true

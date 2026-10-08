@@ -1,0 +1,56 @@
+# Gitleaks default config.
+# Includes upstream rules + extra rules for AI keys, default secrets and auth bypass.
+title = "attri-dev-kit Gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "claude-api-key"
+description = "Anthropic API key"
+regex = '''sk-ant-[a-zA-Z0-9_-]{32,}'''
+tags = ["anthropic"]
+
+[[rules]]
+id = "openai-api-key"
+description = "OpenAI API key"
+regex = '''sk-[a-zA-Z0-9]{20,}T3BlbkFJ[a-zA-Z0-9]{20,}'''
+tags = ["openai"]
+
+[[rules]]
+id = "arcgis-api-key"
+description = "ArcGIS API key"
+regex = '''AAPK[a-zA-Z0-9]{40,}'''
+tags = ["arcgis", "esri"]
+
+[[rules]]
+id = "default-secret-key"
+description = "Default JWT/SECRET_KEY placeholder still in production code"
+regex = '''(?i)(SECRET_KEY|JWT_SECRET|jwt[_-]secret|secret[_-]key)\s*[:=]\s*['"]?(your-secret-key|change-me|change-in-production|django-insecure|please-change|todo)'''
+tags = ["default-secret"]
+
+[[rules]]
+id = "auth-bypass-marker"
+description = "Comment/code suggesting deliberate auth/MFA bypass in production"
+regex = '''(?i)(bypass(ing)?|skip(ping)?|disable[d]?|remove[d]?)\s+(microsoft\s+)?(auth|mfa|verification|sso|login|middleware)'''
+path = '''(?i)(\.py|\.ts|\.tsx|\.js|\.jsx|\.go|\.java|\.cs|\.rb)$'''
+tags = ["auth-bypass"]
+
+[allowlist]
+description = "global allowlist"
+paths = [
+  '''(.*?)(jpg|jpeg|png|gif|svg|ico|woff2?|ttf|eot)$''',
+  '''(.*?)(min\.js|min\.css|map)$''',
+  '''node_modules/''',
+  '''vendor/''',
+  '''\.terraform/''',
+  '''\.git/''',
+  '''tests/fixtures/''',
+  '''examples/.*\.env\.example$'''
+]
+regexes = [
+  # Allow obvious placeholders
+  '''(your-api-key|YOUR_API_KEY|xxxxxxxx|placeholder|<.*>)''',
+  '''sk-ant-PLACEHOLDER''',
+  '''sk-PLACEHOLDER'''
+]

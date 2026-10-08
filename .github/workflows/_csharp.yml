@@ -1,0 +1,143 @@
+name: _csharp
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner for jobs (default ubuntu-latest; set self-hosted to use your own runners).'
+        type: string
+        default: 'ubuntu-latest'
+      tier:
+        type: string
+        required: true
+      run-medium:
+        type: string
+        default: 'false'
+      dotnet-version:
+        type: string
+        default: '8.0.x'
+      diff-coverage-min:
+        description: 'Minimum % of CHANGED lines that must be covered by tests (patch coverage).'
+        type: string
+        default: '80'
+      diff-coverage-enforcement:
+        description: 'warn (advisory, default) | fail (block PRs below diff-coverage-min).'
+        type: string
+        default: 'warn'
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write   # SARIF upload from the Semgrep SAST job
+
+jobs:
+  security:
+    name: Security (Semgrep CLI)
+    # C#/.NET SAST — mirrors the TypeScript security job: non-invasive external
+    # scan (no analyzer packages forced into consumer projects), SARIF to code
+    # scanning. Advisory (findings surface as annotations). (SSoT catalog: C# SAST P0)
+    if: inputs.run-medium == 'true'
+    runs-on: ${{ inputs.runner }}
+    # Installed rather than run via `container: semgrep/semgrep` — see the
+    # matching note in _typescript.yml. Avoids requiring a Docker daemon.
+    steps:
+      - uses: actions/checkout@v6
+      # See the matching note in _typescript.yml: skip the install entirely when
+      # the runner image already ships the pinned Semgrep.
+      - name: Check for Semgrep
+        id: semgrep
+        shell: bash
+        env:
+          WANT: '1.97.0'
+        run: |
+          set -uo pipefail
+          have="$(semgrep --version 2>/dev/null | head -1 || true)"
+          if [ "$have" = "$WANT" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Semgrep ${WANT} preinstalled — skipping install."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Semgrep ${WANT} not present (found: ${have:-none}) — installing."
+          fi
+      - uses: actions/setup-python@v6
+        if: steps.semgrep.outputs.present != 'true'
+        with:
+          python-version: '3.12'
+      - name: Install Semgrep
+        if: steps.semgrep.outputs.present != 'true'
+        run: pip install --disable-pip-version-check semgrep==1.97.0
+      - name: Run Semgrep
+        run: |
+          semgrep scan \
+            --config p/csharp --config p/owasp-top-ten --config p/secrets \
+            --sarif --output=semgrep.sarif \
+            --error || true
+      - uses: github/codeql-action/upload-sarif@v4
+        # Private repos without GHAS can't upload SARIF — don't block the gate.
+        continue-on-error: true
+        if: always() && hashFiles('semgrep.sarif') != '' && !github.event.repository.private
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep-csharp
+
+  format:
+    name: dotnet format
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - run: dotnet restore --locked-mode 2>/dev/null || dotnet restore
+      - run: dotnet format --verify-no-changes --severity warn
+
+  build-test:
+    name: Build + Test
+    runs-on: ${{ inputs.runner }}
+    steps:
+      # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+      # --locked-mode installs strictly from packages.lock.json when present
+      # (fails on drift); falls back to a normal restore if no lockfile exists.
+      # Matches the format job. (SSoT: lockfile integrity P0)
+      - run: dotnet restore --locked-mode 2>/dev/null || dotnet restore
+      - run: dotnet build --no-restore --configuration Release
+      # --collect "XPlat Code Coverage" makes coverlet (bundled with the test SDK)
+      # emit coverage.cobertura.xml. Harmless no-op if the project lacks coverlet.
+      - run: dotnet test --no-build --configuration Release --collect:"XPlat Code Coverage" --logger "trx;LogFileName=test-results.trx"
+        continue-on-error: ${{ inputs.tier == 'dev' }}
+      # Consume-if-present: coverlet's Cobertura uses ABSOLUTE source paths; strip
+      # the workspace prefix so they're repo-relative for diff-cover (same class of
+      # fix as Go's module-prefix strip). (warn-first)
+      - name: Locate coverage report
+        id: cov
+        if: github.event_name == 'pull_request'
+        run: |
+          REPORT="$(find . -name 'coverage.cobertura.xml' 2>/dev/null | head -1)"
+          if [ -n "$REPORT" ]; then
+            sed -i "s#${GITHUB_WORKSPACE}/##g" "$REPORT"
+            echo "report=$REPORT" >> "$GITHUB_OUTPUT"
+          else
+            echo "report=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No coverage.cobertura.xml found. Add the coverlet.collector package to your test project to activate the patch-coverage gate."
+          fi
+      - uses: actions/setup-python@v6
+        if: steps.cov.outputs.report != ''
+        with:
+          python-version: '3.12'
+      - name: Diff coverage gate
+        if: steps.cov.outputs.report != ''
+        uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
+        with:
+          report: ${{ steps.cov.outputs.report }}
+          format: cobertura
+          base-ref: ${{ github.base_ref }}
+          min-coverage: ${{ inputs.diff-coverage-min }}
+          enforcement: ${{ inputs.diff-coverage-enforcement }}

@@ -1,0 +1,1176 @@
+name: gate
+
+# Reusable workflow — call from project repos via:
+#   uses: Attri-Inc/dev-kit/.github/workflows/gate.yml@main
+#
+# Tier-aware: dev (fast), qa/uat (medium), main (full supply-chain).
+# Auto-detects language stack and fans out to per-language jobs.
+#
+# Concurrency is owned by the CALLER (the consumer's wrapper workflow,
+# or self-test.yml when we dogfood). Adding a concurrency block here too
+# silently breaks the dispatch — caller and callee end up trying to hold
+# the same group key, the callee's invocation never starts. See examples/
+# for the wrapper-level concurrency pattern consumers should use.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: |
+          Preferred runner label for gate jobs (default 'ubuntu-latest'). For a
+          self-hosted label, a 'preflight' job resolves the effective runner: it uses this value as
+          requested, and falls back to 'ubuntu-latest' ONLY when the runner is
+          confirmed to have zero online runners — so a down self-hosted fleet
+          never hangs the gate, while an unverifiable status never silently
+          disables it. Detecting status needs a token with self-hosted-runner
+          read (org or repo admin) via the RUNNER_STATUS_TOKEN secret; without
+          it the check is inconclusive and the requested runner is used.
+          GitHub-hosted labels (ubuntu-*/macos-*/windows-*) skip the check.
+          NOTE: scale-to-zero ARC sets report no online runners when idle —
+          keep >=1 warm runner (minRunners>=1) for fallback detection to work.
+        type: string
+        default: 'ubuntu-latest'
+      tier:
+        description: 'Tier hint (dev, qa, uat, main, or "auto" to resolve from branch name)'
+        type: string
+        required: false
+        default: 'auto'
+      languages:
+        description: 'Comma-separated language list, or "auto" to detect'
+        type: string
+        default: 'auto'
+      fail-on:
+        description: 'Severity threshold: critical, high, medium, low, none'
+        type: string
+        default: 'high'
+      skip-test-delta:
+        description: |
+          'true' bypasses the test-delta gate (the check that fails a PR adding
+          20+ production lines with zero test files). Use for repos that opt out
+          of the test-with-code requirement. Per-PR bypass is also available by
+          applying the test-delta-bypass-label (default 'tests-not-needed').
+        type: string
+        default: 'false'
+      test-delta-bypass-label:
+        description: |
+          PR label that bypasses the test-delta gate when applied to a PR.
+          Defaults to 'tests-not-needed'; override to match an existing label.
+        type: string
+        default: 'tests-not-needed'
+      pr-size-soft-limit:
+        type: number
+        default: 400
+      pr-size-hard-limit:
+        type: number
+        default: 600
+      pr-size-weighting:
+        description: |
+          'true' (default) weights changed lines by language density before
+          comparing to the PR-size limits (verbose Go/Java/Terraform count less
+          per line than dense Python/TS). 'false' uses the raw line count.
+        type: string
+        default: 'true'
+      test-os:
+        description: |
+          JSON array of runner OSes for the per-language TEST matrix. Default
+          '["ubuntu-latest"]' (no change). Set e.g.
+          '["ubuntu-latest","macos-latest","windows-latest"]' for libraries/CLIs/
+          native code that must work cross-platform (Python/TypeScript/Go).
+        type: string
+        default: '["ubuntu-latest"]'
+      allowed-author-domains:
+        description: |
+          Comma-separated allowed author/committer email domains. Empty (the
+          default) turns the identity check off. When you set it, include the
+          GitHub bot domains too: users.noreply.github.com is the per-user
+          no-reply address; noreply@github.com is the system committer used
+          for merges done via the GitHub web UI. Example:
+          'example.com,users.noreply.github.com,github.com'
+        type: string
+        default: ''
+      identity-enforcement:
+        description: 'warn or fail (warn for first 60 days; fail thereafter)'
+        type: string
+        default: 'warn'
+      commit-msg-fail-level:
+        description: 'warning or error for commitlint'
+        type: string
+        default: 'warning'
+      secret-scan-historic-mode:
+        description: |
+          What to do with verified live secrets that were committed BEFORE this
+          PR (already on the base branch). 'block' = fail the gate (default).
+          'warn' = print a warning but pass — use when remediation is tracked
+          outside the PR flow. New secrets introduced by the PR always block.
+        type: string
+        default: 'block'
+      run-supply-chain:
+        description: 'Force run supply-chain jobs regardless of tier'
+        type: boolean
+        default: false
+      attestation-frequency:
+        description: |
+          When to run heavyweight attestation jobs (OpenSSF Scorecard,
+          SBOM generation, Sigstore signing). Default 'nightly' means
+          these only run on `schedule:` triggers (consumer adds a daily
+          cron), saving ~$80-100/mo in Actions minutes across active
+          repos. Use 'per-commit' to keep the legacy behavior where
+          every merge to main runs the full attestation chain (~15 min
+          per merge). migration-safety always runs per-commit regardless.
+        type: string
+        default: 'nightly'
+      build-command:
+        description: 'Optional command to produce a buildable artifact for SBOM/Sigstore'
+        type: string
+        default: ''
+      artifact-retention-days:
+        description: |
+          Retention (days) for CI artifacts the gate uploads (built-artifact,
+          SBOM, compliance-evidence). Default 7 — these are ephemeral CI outputs
+          (nightly attestation regenerates them); the GitHub default of 90 days
+          inflates Actions storage. Raise it if you need longer evidence retention.
+        type: string
+        default: '7'
+      python-pre-commit:
+        description: |
+          Pre-commit policy for Python repos: auto (run when
+          .pre-commit-config.yaml present, default) | force | skip.
+          When pre-commit runs, the kit's separate ruff/black, mypy,
+          and bandit jobs are skipped (the repo's config wins).
+        type: string
+        default: 'auto'
+      python-version:
+        description: 'Python version for kit-driven Python jobs (lint, mypy, pre-commit, pytest)'
+        type: string
+        default: '3.11'
+      python-skip-mypy:
+        description: |
+          Bypass the kit's mypy type-check job for Python repos. Owner-approved
+          escape hatch, mirroring the pr-size-guard override — use sparingly and
+          prefer fixing types. Threaded through to _python.yml's skip-mypy input
+          (a string input, so this is a string too — 'true' to bypass).
+        type: string
+        default: 'false'
+      python-test-command:
+        description: |
+          Optional override for the kit's default pytest invocation.
+          Use this for projects whose install/test flow can't be expressed
+          as `pip install -e . && pytest` — e.g. uv-based repos with
+          C-binding deps (weasyprint, pymupdf, pillow) where the editable
+          install fails to build wheels without system libs.
+          Example: 'uv sync --group dev && uv run pytest --cov=app'
+          Threaded through to _python.yml's existing test-command input.
+        type: string
+        default: ''
+      python-test-paths:
+        description: |
+          Optional space-separated list of pytest paths.
+          Defaults to auto-detected tests/ test/ src/tests/ apps/.
+          Threaded through to _python.yml's existing test-paths input.
+        type: string
+        default: ''
+      diff-coverage-min:
+        description: |
+          Minimum % of CHANGED lines (patch coverage) that must be covered by
+          tests on a PR. Applies per-language where coverage is collected.
+        type: string
+        default: '80'
+      diff-coverage-enforcement:
+        description: |
+          'warn' (default) = advisory annotation when patch coverage is below
+          diff-coverage-min; 'fail' = block the PR. Start in warn, flip to fail
+          once repos have baselined.
+        type: string
+        default: 'warn'
+      license-enforcement:
+        description: |
+          Dependency license policy: 'warn' (default) = advisory on a denied
+          (strong/network copyleft) license; 'fail' = block. Permissive licenses
+          always pass; LGPL/weak-copyleft warn. Override exceptions per-repo via
+          a .attri-dev-kit-license-allowlist file.
+        type: string
+        default: 'warn'
+      codeowners-enforcement:
+        description: |
+          CODEOWNERS coverage/validity: 'warn' (default) = advisory if missing,
+          invalid, or lacking a catch-all owner; 'fail' = block.
+        type: string
+        default: 'warn'
+      log-hygiene-enforcement:
+        description: |
+          Log hygiene (secrets/PII in logs, raw debug prints in changed lines):
+          'warn' (default) = advisory; 'fail' = block on a HIGH finding
+          (secret/PII used as a value inside a log/print call).
+        type: string
+        default: 'warn'
+      vuln-prioritize-enforcement:
+        description: |
+          Vulnerability prioritization (CISA KEV + EPSS): 'warn' (default) =
+          advisory ranking; 'fail' = block per vuln-prioritize-fail-on.
+        type: string
+        default: 'warn'
+      vuln-prioritize-fail-on:
+        description: "What blocks when vuln-prioritize-enforcement=fail: kev (default) | epss | both."
+        type: string
+        default: 'kev'
+      malicious-deps-enforcement:
+        description: |
+          Malicious-dependency detection (OSV malicious-packages / MAL-*):
+          'warn' (default) | 'fail'. A hit means known MALWARE in the dep tree —
+          strongly consider 'fail'.
+        type: string
+        default: 'warn'
+      dep-supply-chain-enforcement:
+        description: "Dependency cooldown + confusion guards: 'warn' (default) | 'fail'."
+        type: string
+        default: 'warn'
+      dependency-cooldown-days:
+        description: 'Flag newly-added npm/PyPI deps whose latest release is younger than this many days.'
+        type: string
+        default: '7'
+      internal-scopes:
+        description: 'Comma/space-separated internal namespaces for the dependency-confusion check (e.g. "@acme,acme-"). Empty disables it.'
+        type: string
+        default: ''
+      trojan-source-enforcement:
+        description: "Trojan-source/homoglyph scan of all source: 'warn' (default) | 'fail'."
+        type: string
+        default: 'warn'
+      mcp-allowlist:
+        description: 'Comma/space-separated approved MCP server names/commands. Empty = inventory only.'
+        type: string
+        default: ''
+      mcp-allowlist-enforcement:
+        description: "MCP server allowlist: 'warn' (default) | 'fail'."
+        type: string
+        default: 'warn'
+      conftest-enforcement:
+        description: |
+          Policy-as-code (Conftest/OPA): 'warn' (default) | 'fail'. Runs only when
+          the repo ships Rego under policy/ or .config/policy/ (consume-if-present).
+        type: string
+        default: 'warn'
+      frontend-quality-enforcement:
+        description: |
+          Frontend a11y + performance budgets (Lighthouse CI + size-limit/
+          bundlewatch): 'warn' (default) | 'fail'. Consume-if-present (runs only
+          when a lighthouserc / size-limit / bundlewatch config exists).
+        type: string
+        default: 'warn'
+    secrets:
+      GOOGLE_CHAT_WEBHOOK_URL:
+        description: |
+          Google Chat incoming webhook URL. When set, gate failures are
+          posted to that Chat space. Optional — unset means no notification.
+        required: false
+      RUNNER_STATUS_TOKEN:
+        description: |
+          Token with self-hosted-runner read (org or repo admin) used by the
+          `preflight` job to check whether the requested `runner` is online.
+          Optional — when unset, the default GITHUB_TOKEN cannot list runners,
+          so the status check is inconclusive and the requested runner is used
+          as-is (no fallback). Set this to enable offline fallback.
+        required: false
+      # Declared so callers can pass it explicitly instead of `secrets: inherit`
+      # (which hands every repo/org secret to this workflow).
+      ANTHROPIC_API_KEY:
+        description: |
+          Enables claude-code-security-review in the AI-verification job.
+          Optional — unset skips that one check.
+        required: false
+
+# Workflow-level token. `id-token: write` and `attestations: write` MUST be
+# granted here, not only on the `scorecard`/`attest` jobs: this is a reusable
+# workflow, and in a reusable workflow a job's `permissions:` can only DOWNGRADE
+# from the workflow-level ceiling — it cannot escalate. If a job requests a
+# scope absent from this top-level block, GitHub rejects the whole workflow at
+# load time ("requesting 'id-token: write', but is only allowed 'id-token:
+# none'") → startup_failure for every caller (self-test + all consumers),
+# regardless of tier or `if:` gating. (Removing them as a "least-privilege"
+# tweak in #43 is what broke every consumer; do not drop them again. To scope
+# OIDC more tightly, narrow it per-job DOWN from here, never up.)
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+  id-token: write
+  attestations: write
+  actions: read
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────
+  # Runner selection — prefer the requested (self-hosted) runner, fall back
+  # to ubuntu-latest only when it is CONFIRMED to have zero online runners.
+  # If status can't be queried (no RUNNER_STATUS_TOKEN / no permission) we
+  # stay optimistic and use the requested runner. GitHub-hosted labels skip
+  # the check entirely.
+  # ──────────────────────────────────────────────────────────────────
+  preflight:
+    name: Select runner
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          DESIRED: ${{ inputs.runner }}
+          # Token with self-hosted-runner read (org or repo admin). The default
+          # GITHUB_TOKEN cannot list runners, so without this the status check
+          # is inconclusive and the requested runner is used as-is.
+          RUNNER_STATUS_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          # GitHub-hosted runners are always available — never health-check.
+          case "$DESIRED" in
+            ''|ubuntu-*|windows-*|macos-*)
+              echo "runner=${DESIRED:-ubuntu-latest}" >> "$GITHUB_OUTPUT"
+              echo "::notice::GitHub-hosted runner '${DESIRED:-ubuntu-latest}' — no health check."
+              exit 0 ;;
+          esac
+
+          [ -n "$RUNNER_STATUS_TOKEN" ] && export GH_TOKEN="$RUNNER_STATUS_TOKEN"
+
+          # determined=1 only once an API query succeeds, so a "confirmed zero"
+          # is distinguishable from "couldn't check". Match by name prefix or
+          # label, count only online runners.
+          determined=0; online=0
+          jq='[.runners[] | select((.name|startswith("'"$DESIRED"'")) or ([.labels[].name]|index("'"$DESIRED"'"))) | select(.status=="online")] | length'
+          for path in "orgs/$OWNER/actions/runners" "repos/$REPO/actions/runners"; do
+            if out=$(gh api "$path" --paginate --jq "$jq" 2>/dev/null); then
+              determined=1
+              online=$(( online + $(printf '%s\n' "$out" | awk '{s+=$1} END {print s+0}') ))
+            fi
+          done
+
+          if [ "$determined" -eq 0 ]; then
+            echo "runner=$DESIRED" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not query runner status (set RUNNER_STATUS_TOKEN for fallback detection) — using requested runner '$DESIRED'."
+          elif [ "$online" -gt 0 ]; then
+            echo "runner=$DESIRED" >> "$GITHUB_OUTPUT"
+            echo "::notice::'$DESIRED' has $online online runner(s) — using it."
+          else
+            echo "runner=ubuntu-latest" >> "$GITHUB_OUTPUT"
+            echo "::warning::'$DESIRED' has no online runner — falling back to 'ubuntu-latest'."
+          fi
+
+  # ──────────────────────────────────────────────────────────────────
+  # Detect stack and resolve which jobs to run
+  # ──────────────────────────────────────────────────────────────────
+  detect:
+    name: Detect stack
+    needs: preflight
+    runs-on: ${{ needs.preflight.outputs.runner }}
+    outputs:
+      runner: ${{ needs.preflight.outputs.runner }}
+      kit-skip: ${{ steps.skip.outputs.skip }}
+      tier: ${{ steps.tier.outputs.tier }}
+      languages: ${{ steps.detect.outputs.languages }}
+      has-python: ${{ steps.detect.outputs.has-python }}
+      has-typescript: ${{ steps.detect.outputs.has-typescript }}
+      has-java: ${{ steps.detect.outputs.has-java }}
+      has-go: ${{ steps.detect.outputs.has-go }}
+      has-terraform: ${{ steps.detect.outputs.has-terraform }}
+      has-docker: ${{ steps.detect.outputs.has-docker }}
+      has-shell: ${{ steps.detect.outputs.has-shell }}
+      has-csharp: ${{ steps.detect.outputs.has-csharp }}
+      node-version: ${{ steps.detect.outputs.node-version }}
+      onboarding-pr: ${{ steps.onboarding.outputs.is-onboarding }}
+      run-supply-chain: ${{ steps.tier.outputs.run-supply-chain }}
+      run-medium: ${{ steps.tier.outputs.run-medium }}
+      docs-only: ${{ steps.docsonly.outputs.docs-only }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      # ── Escape hatch: .attri-dev-kit-skip file no-ops the entire kit ──
+      - id: skip
+        shell: bash
+        run: |
+          if [ -f .attri-dev-kit-skip ]; then
+            REASON=$(head -n 1 .attri-dev-kit-skip || echo "no reason given")
+            echo "::notice::attri-dev-kit skipped: $REASON"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      # ── Detect "kit onboarding PR" (only adds attri-dev-kit.yml) ──
+      - id: onboarding
+        if: github.event_name == 'pull_request' && steps.skip.outputs.skip == 'false'
+        shell: bash
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          git fetch origin "$BASE" --depth=1 2>/dev/null || true
+          CHANGED=$(git diff --name-only "origin/$BASE...HEAD" 2>/dev/null || true)
+          if [ -z "$CHANGED" ]; then
+            echo "is-onboarding=false" >> "$GITHUB_OUTPUT"
+          elif [ "$(echo "$CHANGED" | wc -l | tr -d ' ')" = "1" ] && echo "$CHANGED" | grep -q '\.github/workflows/attri-dev-kit\.yml$'; then
+            echo "is-onboarding=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Detected kit onboarding PR — pr-size-guard will be skipped."
+          else
+            echo "is-onboarding=false" >> "$GITHUB_OUTPUT"
+          fi
+      - id: detect
+        if: steps.skip.outputs.skip == 'false'
+        uses: Attri-Inc/dev-kit/.github/actions/detect-stack@main
+        with:
+          languages: ${{ inputs.languages }}
+      - id: tier
+        if: steps.skip.outputs.skip == 'false'
+        env:
+          INPUT_TIER: ${{ inputs.tier }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          REF_BRANCH="${GITHUB_BASE_REF:-$GITHUB_REF_NAME}"
+          if [ "${INPUT_TIER}" != "auto" ]; then
+            T="${INPUT_TIER}"
+          else
+            case "${REF_BRANCH}" in
+              main|master|prod|production|release|release/*) T="main" ;;
+              qa|qa/*|uat|uat/*|staging|stage|stage/*) T="qa" ;;
+              dev|dev/*|dev-*|develop|development|integration|migration) T="dev" ;;
+              feat/*|feature/*|fix/*|chore/*|docs/*|refactor/*) T="dev" ;;
+              cicd|cicid|first-commit) T="dev" ;;
+              *) T="dev" ;;
+            esac
+          fi
+          echo "tier=$T" >> "$GITHUB_OUTPUT"
+          case "$T" in
+            qa|uat|main) echo "run-medium=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "run-medium=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+          if [ "$T" = "main" ] || [ "${{ inputs.run-supply-chain }}" = "true" ]; then
+            echo "run-supply-chain=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run-supply-chain=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "::notice::Resolved tier=$T from branch=$REF_BRANCH"
+      # ── docs-only short-circuit (cost A2): if EVERY changed file is non-code
+      #    (markdown/docs/text/images), the gate's checks skip and gate-passed
+      #    still reports success — so a docs PR is unblocked without burning a
+      #    full run, even for consumers without a wrapper `paths-ignore`.
+      #    CONSERVATIVE: code, lockfiles, configs, and workflow files are NEVER
+      #    treated as docs. Never applies to `schedule` (nightly attestation).
+      - id: docsonly
+        if: steps.skip.outputs.skip == 'false'
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -uo pipefail
+          if [ "$EVENT" != "pull_request" ] && [ "$EVENT" != "push" ]; then
+            echo "docs-only=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$EVENT" = "pull_request" ]; then
+            git fetch origin "$BASE" --depth=1 2>/dev/null || true
+            CHANGED=$(git diff --name-only "origin/$BASE...HEAD" 2>/dev/null || true)
+          elif [ -n "${BEFORE:-}" ] && git rev-parse --verify "$BEFORE" >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only "$BEFORE...HEAD" 2>/dev/null || true)
+          else
+            CHANGED=$(git diff --name-only HEAD~1...HEAD 2>/dev/null || true)
+          fi
+          if [ -z "$CHANGED" ]; then
+            echo "docs-only=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # Any file NOT on the conservative non-code allowlist => NOT docs-only.
+          NONDOCS=$(echo "$CHANGED" | grep -ivE '(\.md$|(^|/)docs/|(^|/)LICENSE|\.txt$|(^|/)\.gitignore$|(^|/)\.editorconfig$|\.(png|jpe?g|gif|svg|ico|webp|pdf)$)' || true)
+          if [ -z "$NONDOCS" ]; then
+            echo "docs-only=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::docs-only change — gate checks skipped (only markdown/docs/text/images changed). gate-passed still reports success."
+          else
+            echo "docs-only=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ──────────────────────────────────────────────────────────────────
+  # Universal jobs — every tier, every repo
+  # ──────────────────────────────────────────────────────────────────
+  actionlint:
+    name: Lint workflows
+    needs: detect
+    if: needs.detect.outputs.kit-skip == 'false'
+    runs-on: ${{ needs.detect.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - name: Skip if no workflow files changed
+        id: filter
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          # Run actionlint only when workflow/action files changed in the PR/push
+          if [ -n "${BASE:-}" ]; then
+            git fetch origin "$BASE" --depth=1 2>/dev/null || true
+            CHANGED=$(git diff --name-only "origin/$BASE...HEAD" 2>/dev/null || echo "")
+          else
+            CHANGED=$(git diff --name-only HEAD~1...HEAD 2>/dev/null || echo "")
+          fi
+          if echo "$CHANGED" | grep -qE '^\.github/(workflows|actions)/'; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::No workflow/action files changed — skipping actionlint."
+          fi
+      # reviewdog/action-actionlint is itself a Docker action pulled from
+      # ghcr.io on every run. Run the binary instead: preinstalled on
+      # self-hosted runner images, downloaded on the GitHub-hosted fallback.
+      #
+      # Trade-off: reviewdog posted findings as inline PR review comments;
+      # actionlint's own output appears in the job log instead.
+      - name: Lint workflows (actionlint)
+        if: steps.filter.outputs.skip != 'true'
+        shell: bash
+        env:
+          WANT: '1.7.12'
+        run: |
+          set -uo pipefail
+          have="$(actionlint --version 2>/dev/null | head -1 || true)"
+          if [ "$have" = "$WANT" ]; then
+            echo "::notice::actionlint ${WANT} preinstalled — skipping download."
+          else
+            echo "::notice::actionlint ${WANT} not present (found: ${have:-none}) — installing."
+            set -e
+            curl -fsSL -o /tmp/actionlint.tgz \
+              "https://github.com/rhysd/actionlint/releases/download/v${WANT}/actionlint_${WANT}_linux_amd64.tar.gz"
+            tar -xzf /tmp/actionlint.tgz -C /tmp actionlint
+            sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+            rm -f /tmp/actionlint.tgz /tmp/actionlint
+            set +e
+          fi
+          # actionlint shells out to shellcheck for `run:` blocks. Without it
+          # those checks are silently skipped and broken scripts lint clean, so
+          # say so loudly rather than reporting a false pass.
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            echo "::warning::shellcheck not found — actionlint will skip shell script checks."
+          fi
+          actionlint
+
+  secrets-scan:
+    name: Secret scan
+    needs: detect
+    if: needs.detect.outputs.kit-skip == 'false'
+    runs-on: ${{ needs.detect.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: ${{ needs.detect.outputs.tier == 'dev' && 1 || 0 }}
+      - uses: Attri-Inc/dev-kit/.github/actions/detect-secrets@main
+        with:
+          tier: ${{ needs.detect.outputs.tier }}
+          fail-on-historic: ${{ inputs.secret-scan-historic-mode }}
+
+  # ──────────────────────────────────────────────────────────────────
+  # Grouped fast checks (cost A1): each quick composite-action check runs as a
+  # STEP in one of three shared-runner jobs instead of its own job — avoiding
+  # GitHub's per-job minute rounding and de-duplicating the base-branch fetch.
+  # `if: ${{ !cancelled() && <gate> }}` makes every check still RUN (so a dev
+  # sees all findings at once), and the job auto-fails if any non-advisory step
+  # fails — so gate-passed blocks exactly as before. Each check keeps its own
+  # tier/event gate and continue-on-error setting from when it was a job.
+  # ──────────────────────────────────────────────────────────────────
+  hygiene:
+    name: Hygiene checks
+    needs: detect
+    # No docs-only skip: markdown-lint + typo-check + identity are relevant on
+    # docs-only changes too (and the job is cheap).
+    if: needs.detect.outputs.kit-skip == 'false'
+    runs-on: ${{ needs.detect.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - name: Committer identity
+        if: ${{ !cancelled() }}
+        uses: Attri-Inc/dev-kit/.github/actions/identity-check@main
+        with:
+          allowed-domains: ${{ inputs.allowed-author-domains }}
+          tier: ${{ needs.detect.outputs.tier }}
+          enforcement: ${{ inputs.identity-enforcement }}
+      # v2.2.0 of this action looked only for the legacy 'ec-<os>-<arch>' asset.
+      # editorconfig-checker v4.0.0 dropped that name in favour of
+      # 'editorconfig-checker-<os>-<arch>', so with the action's default
+      # version:latest every consumer broke the moment v4.0.0 shipped
+      # (2026-09-03). v3.0.0 of the action tries the new name first and falls
+      # back to the legacy one, so it works against v3 and v4 binaries alike.
+      #
+      # The binary itself is pinned rather than left on latest: v4.0.0 is a
+      # breaking release beyond the rename — '.ecrc' is no longer discovered as
+      # a default config name, and latin1 files no longer satisfy
+      # charset=utf-8. Those would land unannounced across every gated repo.
+      # v3.11.3 is the last v3 and matches what consumers were running before
+      # the break. Adopt v4 as its own change, once .ecrc users have migrated.
+      - name: Editorconfig
+        if: ${{ !cancelled() }}
+        uses: editorconfig-checker/action-editorconfig-checker@51f63319f592f97930c73d9c46184d20bd206393 # v3.0.0
+        with:
+          version: v3.11.3
+      - name: Shell scripts must be LF
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          BAD="$(git ls-files --eol -- '*.sh' '*.bash' 2>/dev/null | grep -E '^i/(crlf|mixed)' || true)"
+          if [ -n "$BAD" ]; then
+            echo "::warning::Shell script(s) committed with CRLF line endings — these break on Linux/CI. Add policies/.gitattributes ('*.sh text eol=lf') and re-normalize."
+            echo "$BAD"
+          else
+            echo "::notice::No CRLF shell scripts detected."
+          fi
+      - name: PR size guard
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.detect.outputs.onboarding-pr != 'true' }}
+        uses: Attri-Inc/dev-kit/.github/actions/pr-size-guard@main
+        with:
+          soft-limit: ${{ inputs.pr-size-soft-limit }}
+          hard-limit: ${{ inputs.pr-size-hard-limit }}
+          size-weighting: ${{ inputs.pr-size-weighting }}
+      # commitlint is an npm package. The wagoid action wraps it in a Docker
+      # image, which needs a daemon on the runner AND fetches the commit list
+      # over the GitHub API — on failure it reports "You have commit messages
+      # with errors" even when the real fault was a network timeout. Running the
+      # CLI directly against the local range is both daemon-free and honest
+      # about what failed. `fetch-depth: 0` on this job's checkout gives us the
+      # full history the range needs.
+      - name: Conventional commits
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          FAIL_LEVEL: ${{ inputs.commit-msg-fail-level }}
+        run: |
+          set -uo pipefail
+          # GitHub runs step shells with -e. Clear it so a non-zero commitlint
+          # exit can be inspected and downgraded per commit-msg-fail-level,
+          # instead of aborting the step before that logic runs.
+          set +e
+
+          # commitlint resolves `extends:` relative to the CONFIG FILE's
+          # directory, not the cwd or the npx cache — so the packages must sit
+          # next to the config it loads. Install into a temp dir and point
+          # commitlint at a copy of the config there: the repo's working tree
+          # stays clean (no node_modules/package-lock.json left behind for
+          # stack detection or file scanners to trip over), while git
+          # operations still run against the checked-out repo via cwd.
+          CL_DIR="$(mktemp -d)"
+          trap 'rm -rf "${CL_DIR}"' EXIT
+          cp .github/commitlint.config.mjs "${CL_DIR}/commitlint.config.mjs"
+
+          # Self-hosted runner images preinstall commitlint at a fixed prefix.
+          # Symlinking that node_modules beside the config copy satisfies the
+          # extends resolution without an npm install; GitHub-hosted runners
+          # fall through to installing.
+          if [ -d /opt/commitlint/node_modules/@commitlint/config-conventional ]; then
+            ln -s /opt/commitlint/node_modules "${CL_DIR}/node_modules"
+            echo "::notice::commitlint: using preinstalled packages."
+          elif ! npm install --prefix "${CL_DIR}" --no-save --no-audit --no-fund --silent \
+                 @commitlint/cli@19 @commitlint/config-conventional@19; then
+            echo "::error::commitlint: could not install @commitlint/cli."
+            exit 1
+          fi
+
+          "${CL_DIR}/node_modules/.bin/commitlint" \
+            --config "${CL_DIR}/commitlint.config.mjs" \
+            --from "${BASE_SHA}" --to "${HEAD_SHA}" \
+            --verbose
+          rc=$?
+
+          if [ "$rc" -ne 0 ] && [ "${FAIL_LEVEL}" != "error" ]; then
+            echo "::warning::commitlint reported problems (advisory: commit-msg-fail-level=${FAIL_LEVEL})."
+            exit 0
+          fi
+          exit "$rc"
+      - name: CODEOWNERS
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: Attri-Inc/dev-kit/.github/actions/codeowners-check@main
+        with:
+          enforcement: ${{ inputs.codeowners-enforcement }}
+          github-token: ${{ github.token }}
+      - name: Markdown lint
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
+        uses: DavidAnson/markdownlint-cli2-action@v23
+        with:
+          globs: '**/*.md'
+          config: .github/.markdownlint.json
+        continue-on-error: true
+      - name: Typo check
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
+        uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
+        continue-on-error: true
+
+  code-scan:
+    name: Code scan (trojan-source / MCP / log-hygiene)
+    needs: detect
+    if: needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    runs-on: ${{ needs.detect.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - name: Trojan Source + homoglyph
+        if: ${{ !cancelled() }}
+        uses: Attri-Inc/dev-kit/.github/actions/trojan-source-scan@main
+        with:
+          enforcement: ${{ inputs.trojan-source-enforcement }}
+      - name: MCP server allowlist
+        if: ${{ !cancelled() }}
+        uses: Attri-Inc/dev-kit/.github/actions/mcp-allowlist@main
+        with:
+          allowlist: ${{ inputs.mcp-allowlist }}
+          enforcement: ${{ inputs.mcp-allowlist-enforcement }}
+      - name: Log hygiene
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: Attri-Inc/dev-kit/.github/actions/log-hygiene@main
+        with:
+          enforcement: ${{ inputs.log-hygiene-enforcement }}
+
+  dep-scan:
+    name: Dependency scans (cooldown / license / vuln / malware / policy)
+    needs: detect
+    # Runs when any constituent applies: dep-cooldown on PRs, the rest at medium tier.
+    if: needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && (github.event_name == 'pull_request' || needs.detect.outputs.run-medium == 'true')
+    runs-on: ${{ needs.detect.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - name: Dependency cooldown + confusion
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: Attri-Inc/dev-kit/.github/actions/dep-supply-chain@main
+        with:
+          enforcement: ${{ inputs.dep-supply-chain-enforcement }}
+          cooldown-days: ${{ inputs.dependency-cooldown-days }}
+          internal-scopes: ${{ inputs.internal-scopes }}
+      - name: License compliance
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
+        uses: Attri-Inc/dev-kit/.github/actions/license-check@main
+        with:
+          enforcement: ${{ inputs.license-enforcement }}
+      - name: Vuln prioritization (KEV + EPSS)
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
+        uses: Attri-Inc/dev-kit/.github/actions/vuln-prioritize@main
+        with:
+          enforcement: ${{ inputs.vuln-prioritize-enforcement }}
+          fail-on: ${{ inputs.vuln-prioritize-fail-on }}
+      - name: Malicious dependency scan (OSV)
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
+        uses: Attri-Inc/dev-kit/.github/actions/malicious-deps@main
+        with:
+          enforcement: ${{ inputs.malicious-deps-enforcement }}
+      - name: Policy-as-code (Conftest)
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
+        uses: Attri-Inc/dev-kit/.github/actions/conftest-policy@main
+        with:
+          enforcement: ${{ inputs.conftest-enforcement }}
+
+  ai-provenance:
+    name: AI provenance + label
+    needs: detect
+    if: github.event_name == 'pull_request' && needs.detect.outputs.kit-skip == 'false'
+    runs-on: ${{ needs.detect.outputs.runner }}
+    outputs:
+      ai-authored: ${{ steps.prov.outputs.ai-authored }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - id: prov
+        uses: Attri-Inc/dev-kit/.github/actions/ai-provenance@main
+
+  ai-verification:
+    name: AI-specific verification
+    needs: [detect, ai-provenance]
+    if: needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    uses: ./.github/workflows/_ai-verification.yml
+    with:
+      runner: ${{ needs.detect.outputs.runner }}
+      tier: ${{ needs.detect.outputs.tier }}
+      run-medium: ${{ needs.detect.outputs.run-medium }}
+      ai-detected: ${{ needs.ai-provenance.outputs.ai-authored }}
+      fail-on: ${{ inputs.fail-on }}
+      skip-test-delta: ${{ inputs.skip-test-delta }}
+      test-delta-bypass-label: ${{ inputs.test-delta-bypass-label }}
+    secrets: inherit
+
+  # ──────────────────────────────────────────────────────────────────
+  # Per-language jobs (run only when stack detected)
+  # ──────────────────────────────────────────────────────────────────
+  python:
+    name: Python
+    needs: detect
+    if: needs.detect.outputs.has-python == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    uses: ./.github/workflows/_python.yml
+    with:
+      runner: ${{ needs.detect.outputs.runner }}
+      tier: ${{ needs.detect.outputs.tier }}
+      run-medium: ${{ needs.detect.outputs.run-medium }}
+      fail-on: ${{ inputs.fail-on }}
+      run-pre-commit: ${{ inputs.python-pre-commit }}
+      python-version: ${{ inputs.python-version }}
+      skip-mypy: ${{ inputs.python-skip-mypy }}
+      test-command: ${{ inputs.python-test-command }}
+      test-paths: ${{ inputs.python-test-paths }}
+      diff-coverage-min: ${{ inputs.diff-coverage-min }}
+      diff-coverage-enforcement: ${{ inputs.diff-coverage-enforcement }}
+      test-os: ${{ inputs.test-os }}
+
+  typescript:
+    name: TypeScript / JavaScript
+    needs: detect
+    if: needs.detect.outputs.has-typescript == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    uses: ./.github/workflows/_typescript.yml
+    with:
+      runner: ${{ needs.detect.outputs.runner }}
+      tier: ${{ needs.detect.outputs.tier }}
+      run-medium: ${{ needs.detect.outputs.run-medium }}
+      fail-on: ${{ inputs.fail-on }}
+      # Honor the repo's declared Node (.nvmrc / engines); fall back to 20.
+      node-version: ${{ needs.detect.outputs.node-version || '20' }}
+      diff-coverage-min: ${{ inputs.diff-coverage-min }}
+      diff-coverage-enforcement: ${{ inputs.diff-coverage-enforcement }}
+      frontend-quality-enforcement: ${{ inputs.frontend-quality-enforcement }}
+      test-os: ${{ inputs.test-os }}
+
+  java:
+    name: Java
+    needs: detect
+    if: needs.detect.outputs.has-java == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    uses: ./.github/workflows/_java.yml
+    with:
+      runner: ${{ needs.detect.outputs.runner }}
+      tier: ${{ needs.detect.outputs.tier }}
+      run-medium: ${{ needs.detect.outputs.run-medium }}
+      fail-on: ${{ inputs.fail-on }}
+      diff-coverage-min: ${{ inputs.diff-coverage-min }}
+      diff-coverage-enforcement: ${{ inputs.diff-coverage-enforcement }}
+
+  go:
+    name: Go
+    needs: detect
+    if: needs.detect.outputs.has-go == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    uses: ./.github/workflows/_go.yml
+    with:
+      runner: ${{ needs.detect.outputs.runner }}
+      tier: ${{ needs.detect.outputs.tier }}
+      run-medium: ${{ needs.detect.outputs.run-medium }}
+      fail-on: ${{ inputs.fail-on }}
+      diff-coverage-min: ${{ inputs.diff-coverage-min }}
+      diff-coverage-enforcement: ${{ inputs.diff-coverage-enforcement }}
+      test-os: ${{ inputs.test-os }}
+
+  terraform:
+    name: Terraform
+    needs: detect
+    if: needs.detect.outputs.has-terraform == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      runner: ${{ needs.detect.outputs.runner }}
+      tier: ${{ needs.detect.outputs.tier }}
+      run-medium: ${{ needs.detect.outputs.run-medium }}
+      fail-on: ${{ inputs.fail-on }}
+
+  docker:
+    name: Docker
+    needs: detect
+    if: needs.detect.outputs.has-docker == 'true' && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    uses: ./.github/workflows/_docker.yml
+    with:
+      runner: ${{ needs.detect.outputs.runner }}
+      tier: ${{ needs.detect.outputs.tier }}
+      fail-on: ${{ inputs.fail-on }}
+
+  shell:
+    name: Shell
+    needs: detect
+    if: needs.detect.outputs.has-shell == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    uses: ./.github/workflows/_shell.yml
+    with:
+      runner: ${{ needs.detect.outputs.runner }}
+      tier: ${{ needs.detect.outputs.tier }}
+
+  csharp:
+    name: C#
+    needs: detect
+    if: needs.detect.outputs.has-csharp == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    uses: ./.github/workflows/_csharp.yml
+    with:
+      runner: ${{ needs.detect.outputs.runner }}
+      tier: ${{ needs.detect.outputs.tier }}
+      run-medium: ${{ needs.detect.outputs.run-medium }}
+      diff-coverage-min: ${{ inputs.diff-coverage-min }}
+      diff-coverage-enforcement: ${{ inputs.diff-coverage-enforcement }}
+
+  # ──────────────────────────────────────────────────────────────────
+  # Supply-chain jobs (main tier or explicit override only)
+  # ──────────────────────────────────────────────────────────────────
+  scorecard:
+    name: OpenSSF Scorecard
+    needs: detect
+    # Skip on private repos — the scorecard action's GraphQL ListCommits
+    # call returns "Resource not accessible by integration" without a
+    # paid plan. We previously gated only the SARIF upload step, but the
+    # scorecard action itself fails before that, leaving the job red.
+    #
+    # Attestation-frequency gate: runs on every main merge when
+    # `attestation-frequency: per-commit`; otherwise only on `schedule:`
+    # triggers (consumer adds daily cron). Saves ~$25-35/mo of Scorecard.
+    if: ${{ needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && !github.event.repository.private && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule') }}
+    runs-on: ${{ needs.detect.outputs.runner }}
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with: { persist-credentials: false }
+      - uses: ossf/scorecard-action@v2.4.3
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          publish_results: false
+      - uses: github/codeql-action/upload-sarif@v4
+        # Private repos without GitHub Advanced Security can't upload SARIF.
+        # Skip the step entirely when private — `continue-on-error` would still
+        # emit a noisy annotation. Public repos always upload (free GHAS-equiv).
+        if: ${{ !github.event.repository.private }}
+        continue-on-error: true
+        with:
+          sarif_file: scorecard-results.sarif
+
+  build-artifact:
+    name: Build artifact for attestation
+    needs: detect
+    # Only needed when sbom + attest jobs run (their dependency).
+    # Gated together — same attestation-frequency rule as scorecard.
+    if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule')
+    runs-on: ${{ needs.detect.outputs.runner }}
+    outputs:
+      artifact-path: ${{ steps.build.outputs.artifact-path }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - id: build
+        uses: Attri-Inc/dev-kit/.github/actions/build-artifact@main
+        with:
+          build-command: ${{ inputs.build-command }}
+          languages: ${{ needs.detect.outputs.languages }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: built-artifact
+          path: ${{ steps.build.outputs.artifact-path }}
+          if-no-files-found: warn
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+  sbom:
+    name: SBOM (CycloneDX + SPDX)
+    needs: [detect, build-artifact]
+    if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule')
+    runs-on: ${{ needs.detect.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: built-artifact
+          path: dist/
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: ./
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: ./
+          format: spdx-json
+          output-file: sbom.spdx.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: |
+            sbom.cdx.json
+            sbom.spdx.json
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+  attest:
+    name: Sigstore build attestation
+    needs: [detect, build-artifact, sbom]
+    if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule')
+    runs-on: ${{ needs.detect.outputs.runner }}
+    environment: ${{ needs.detect.outputs.tier == 'main' && 'production' || '' }}
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: built-artifact
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          name: sbom
+      - name: Check Sigstore attestation availability
+        id: attest-gate
+        shell: bash
+        run: |
+          # Sigstore attestation requires GitHub Enterprise (or a public repo).
+          # On private repos in plans without it, the API returns
+          # "Feature not available for the <org>". Detect upfront and skip
+          # entirely — `continue-on-error` would still emit a noisy annotation.
+          if [ '${{ github.event.repository.private }}' = 'true' ]; then
+            echo "::notice::Sigstore attestation skipped — private repo without GitHub Enterprise. Set up GHAS to enable."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Attest the artifact (not just the SBOM)
+        if: steps.attest-gate.outputs.skip != 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/**
+            sbom.cdx.json
+            sbom.spdx.json
+      # Generate→verify self-check: confirm the attestation we just produced is
+      # real and retrievable (a broken signing setup otherwise ships silently).
+      # Advisory here (it's a self-check, not a merge gate); deploy-time
+      # verification of consumed images is hard-fail. (SSoT catalog: Supply chain P0)
+      - name: Verify the attestation we just created
+        if: steps.attest-gate.outputs.skip != 'true'
+        uses: Attri-Inc/dev-kit/.github/actions/verify-attestation@main
+        with:
+          subject: sbom.cdx.json
+          subject-type: file
+          owner: ${{ github.repository_owner }}
+          repo: ${{ github.repository }}
+          enforcement: warn
+          github-token: ${{ github.token }}
+
+  migration-safety:
+    name: Migration safety
+    needs: detect
+    if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    runs-on: ${{ needs.detect.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - uses: Attri-Inc/dev-kit/.github/actions/migration-safety@main
+
+  # ──────────────────────────────────────────────────────────────────
+  # Final gate — all required jobs must pass
+  # ──────────────────────────────────────────────────────────────────
+  gate-passed:
+    name: Gate passed
+    if: always() && needs.detect.outputs.kit-skip == 'false'
+    needs:
+      - detect
+      - actionlint
+      - secrets-scan
+      - ai-verification
+      # Grouped fast checks (cost A1): the quick composite-action checks now run
+      # as steps inside these 3 jobs. Each is `if:`-gated, so GitHub reports
+      # 'skipped' when not applicable and the grep below ignores that — but a
+      # genuine 'failure' MUST block. (hygiene = identity/editorconfig/pr-size/
+      # commit-msg/codeowners/markdown/typos; code-scan = trojan-source/mcp/
+      # log-hygiene; dep-scan = cooldown/license/vuln/malware/conftest.)
+      - hygiene
+      - code-scan
+      - dep-scan
+      # migration-safety is the documented always-run per-merge DB check.
+      - migration-safety
+      # Per-language jobs are listed too: GitHub reports 'skipped'
+      # when their `if:` is false, and the grep below ignores that.
+      # Failure in any language pipeline (lint/test/pre-commit) blocks.
+      - python
+      - typescript
+      - java
+      - go
+      - terraform
+      - docker
+      - shell
+      - csharp
+    runs-on: ${{ needs.detect.outputs.runner || 'ubuntu-latest' }}
+    steps:
+      - name: Verify required jobs
+        run: |
+          status='${{ join(needs.*.result, ',') }}'
+          echo "Job results: $status"
+          if echo "$status" | grep -E '(failure|cancelled)' > /dev/null; then
+            echo "::error::One or more required gate jobs failed."
+            exit 1
+          fi
+          echo "✅ All required gate jobs passed."
+      # Compliance evidence as a byproduct: a machine-readable record of which
+      # gates ran + their results + who/what/when, for SOC2/ISO/PCI audit trails.
+      # See docs/compliance-control-mapping.md for gate->control coverage. (SSoT: compliance evidence P0)
+      - name: Emit compliance evidence
+        if: always()
+        shell: bash
+        env:
+          NEEDS: ${{ toJson(needs) }}
+        run: |
+          # toJson(needs) is always valid, non-empty JSON; guard for the empty
+          # case WITHOUT `${NEEDS:-{}}` — bash matches the first `}` as the close
+          # of the expansion, so that form appends a stray `}` and yields invalid
+          # JSON ("invalid JSON text passed to --argjson"), failing the gate.
+          checks="${NEEDS:-}"
+          [ -n "$checks" ] || checks='{}'
+          jq -n \
+            --arg repo "$GITHUB_REPOSITORY" --arg sha "$GITHUB_SHA" --arg ref "$GITHUB_REF" \
+            --arg run "$GITHUB_RUN_ID" --arg event "$GITHUB_EVENT_NAME" --arg actor "$GITHUB_ACTOR" \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson checks "$checks" \
+            '{schema:"attri-dev-kit/compliance-evidence/v1",repository:$repo,commit:$sha,ref:$ref,run_id:$run,event:$event,actor:$actor,generated_at:$ts,checks:($checks|map_values(.result))}' \
+            > compliance-evidence.json
+          {
+            echo "## Compliance evidence"
+            echo "Emitted \`compliance-evidence.json\` (artifact) — gate results + provenance for audit trails."
+            echo "Gate→control coverage: \`docs/compliance-control-mapping.md\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: compliance-evidence
+          path: compliance-evidence.json
+          if-no-files-found: warn
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+  # ──────────────────────────────────────────────────────────────────
+  # Failure notification — posts to Google Chat when any gate job fails.
+  # Opt-in: fires only when the caller passes GOOGLE_CHAT_WEBHOOK_URL.
+  # Without it the action no-ops on an empty webhook.
+  # ──────────────────────────────────────────────────────────────────
+  notify-gchat:
+    name: Notify Google Chat on failure
+    # always() so it runs even though upstream jobs failed; the contains()
+    # guard means it only posts when something actually failed. 'cancelled'
+    # is intentionally excluded — concurrency cancel-in-progress would make
+    # it noisy. The kit-skip check keeps the kit's escape hatch honest.
+    if: always() && needs.detect.outputs.kit-skip == 'false' && contains(needs.*.result, 'failure')
+    needs:
+      - detect
+      - actionlint
+      - secrets-scan
+      - ai-verification
+      - hygiene
+      - code-scan
+      - dep-scan
+      - migration-safety
+      - python
+      - typescript
+      - java
+      - go
+      - terraform
+      - docker
+      - shell
+      - csharp
+    runs-on: ${{ needs.detect.outputs.runner || 'ubuntu-latest' }}
+    permissions:
+      actions: read   # read which jobs/steps failed in this run
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Attri-Inc/dev-kit/.github/actions/notify-gchat-ci@main
+        with:
+          webhook_url: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
+          github_token: ${{ github.token }}

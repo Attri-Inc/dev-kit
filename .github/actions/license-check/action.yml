@@ -1,0 +1,167 @@
+name: 'License compliance check'
+description: |
+  Detects the license of every dependency (via Trivy's license scanner, which
+  reads all ecosystem lockfiles) and applies an explicit allow / warn / deny
+  policy. Default posture: DENY strong + network copyleft (GPL, AGPL, SSPL,
+  BUSL, OSL, EUPL, CC-BY-NC, …) that can force you to open-source proprietary
+  code; WARN on weak copyleft (LGPL, MPL-1.x, EPL, CDDL); ALLOW permissive
+  (MIT/Apache/BSD/ISC/MPL-2.0/…).
+
+  Trivy is used only to ENUMERATE licenses; the policy is applied here so it is
+  transparent and tunable (and so LGPL is treated as warn, not lumped with GPL).
+  Warn-first: enforcement=warn annotates but never fails; enforcement=fail blocks.
+  A repo allowlist file silences reviewed exceptions (package names or license IDs).
+author: 'Attri Inc'
+
+inputs:
+  path:
+    description: 'Directory to scan.'
+    required: false
+    default: '.'
+  enforcement:
+    description: 'warn (advisory, default) | fail (block on a denied license).'
+    required: false
+    default: 'warn'
+  deny:
+    description: 'Extended-regex of license IDs to DENY (case-insensitive).'
+    required: false
+    default: '\b(A?GPL|SSPL|BUSL|OSL|RPL|EUPL|CC-BY-NC|Commons-Clause|Parity|CAL|NPOSL)\b'
+  warn-licenses:
+    description: 'Extended-regex of license IDs to WARN on (weak copyleft).'
+    required: false
+    default: '\b(LGPL|MPL-1|EPL-|CDDL|MS-RL|CECILL)\b'
+  allowlist-file:
+    description: 'Path to a newline-delimited allowlist of package names or license IDs to ignore (# comments allowed).'
+    required: false
+    default: '.attri-dev-kit-license-allowlist'
+
+outputs:
+  denied-count:
+    description: 'Number of dependencies whose license is on the deny list (after allowlist).'
+    value: ${{ steps.policy.outputs.denied-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    # trivy-action runs Trivy inside a Docker image, which needs a daemon on the
+    # runner. A filesystem scan needs no container. Self-hosted runner images
+    # ship Trivy preinstalled, so only install when it is missing or mismatched.
+    - name: Check for Trivy
+      id: trivy
+      shell: bash
+      env:
+        WANT: '0.74.0'
+      run: |
+        set -uo pipefail
+        have="$(trivy --version 2>/dev/null | head -1 | awk '{print $2}' || true)"
+        if [ "$have" = "$WANT" ]; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::Trivy ${WANT} not present (found: ${have:-none}) — installing."
+        fi
+
+    - name: Install Trivy
+      if: steps.trivy.outputs.present != 'true'
+      uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+      with:
+        version: v0.74.0
+        cache: true
+
+    - name: Trivy license scan (enumerate)
+      shell: bash
+      env:
+        SCAN_PATH: ${{ inputs.path }}
+      run: |
+        set -uo pipefail
+        # A baked vulnerability DB is only trustworthy while it is fresh, and it
+        # does not exist at all on GitHub-hosted runners. Skip the update only
+        # when a DB is present AND younger than the image's daily rebuild.
+        SKIP_DB=""
+        DB="${HOME}/.cache/trivy/db/trivy.db"
+        if [ -f "$DB" ] && [ -z "$(find "$DB" -mtime +1 2>/dev/null)" ]; then
+          SKIP_DB="--skip-db-update"
+          echo "::notice::Using baked Trivy DB (fresh) — skipping DB update."
+        fi
+        # exit-code 0: never fail here — policy is applied in the next step.
+        # shellcheck disable=SC2086  # SKIP_DB is a deliberate optional flag
+        trivy fs $SKIP_DB \
+          --scanners license \
+          --format json \
+          --output trivy-license.json \
+          --exit-code 0 \
+          --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+          "${SCAN_PATH}"
+
+    - name: Apply license policy
+      id: policy
+      shell: bash
+      env:
+        ENFORCE: ${{ inputs.enforcement }}
+        DENY_RE: ${{ inputs.deny }}
+        WARN_RE: ${{ inputs.warn-licenses }}
+        ALLOWLIST: ${{ inputs.allowlist-file }}
+      run: |
+        set -uo pipefail
+        echo "denied-count=0" >> "$GITHUB_OUTPUT"
+
+        if [ ! -f trivy-license.json ]; then
+          echo "::notice::license-check: no Trivy license report produced (no recognized dependencies?) — skipping."
+          exit 0
+        fi
+
+        # Build the allowlist matcher (package names or license IDs). Empty file/none => match nothing.
+        ALLOW_TMP="$(mktemp)"
+        if [ -f "$ALLOWLIST" ]; then
+          grep -vE '^\s*(#|$)' "$ALLOWLIST" > "$ALLOW_TMP" || true
+        fi
+        is_allowlisted() { # $1=pkg $2=license
+          [ -s "$ALLOW_TMP" ] || return 1
+          grep -qxiF "$1" "$ALLOW_TMP" && return 0
+          grep -qxiF "$2" "$ALLOW_TMP" && return 0
+          return 1
+        }
+
+        # Flatten Trivy license findings: "pkg<TAB>license" (dedup).
+        mapfile -t ROWS < <(jq -r '.Results[]?.Licenses[]? | "\(.PkgName // "?")\t\(.Name // "?")"' trivy-license.json 2>/dev/null | sort -u)
+
+        DENIED=(); WARNED=()
+        for row in "${ROWS[@]}"; do
+          [ -z "$row" ] && continue
+          PKG="${row%%$'\t'*}"; LIC="${row#*$'\t'}"
+          [ "$LIC" = "?" ] && continue
+          if is_allowlisted "$PKG" "$LIC"; then continue; fi
+          if printf '%s' "$LIC" | grep -qiE "$DENY_RE"; then
+            DENIED+=( "$PKG :: $LIC" )
+          elif printf '%s' "$LIC" | grep -qiE "$WARN_RE"; then
+            WARNED+=( "$PKG :: $LIC" )
+          fi
+        done
+
+        {
+          echo "## License compliance"
+          echo ""
+          echo "- Denied (policy violation): ${#DENIED[@]}"
+          echo "- Weak-copyleft warnings: ${#WARNED[@]}"
+          if [ "${#DENIED[@]}" -gt 0 ]; then
+            echo ""; echo "### ❌ Denied licenses"; for d in "${DENIED[@]}"; do echo "- \`$d\`"; done
+          fi
+          if [ "${#WARNED[@]}" -gt 0 ]; then
+            echo ""; echo "### ⚠️ Weak-copyleft (review)"; for w in "${WARNED[@]}"; do echo "- \`$w\`"; done
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo "denied-count=${#DENIED[@]}" >> "$GITHUB_OUTPUT"
+        for w in "${WARNED[@]}"; do echo "::warning::license-check: weak-copyleft dependency $w (review for compatibility)."; done
+
+        if [ "${#DENIED[@]}" -eq 0 ]; then
+          echo "::notice::license-check: no denied licenses found."
+          exit 0
+        fi
+        for d in "${DENIED[@]}"; do echo "::error::license-check: denied license — $d"; done
+        if [ "$ENFORCE" = "fail" ]; then
+          echo "::error::license-check: ${#DENIED[@]} dependency(ies) carry a denied (strong/network copyleft) license."
+          exit 1
+        fi
+        echo "::warning::license-check: ${#DENIED[@]} denied-license dependency(ies) found (advisory — not blocking; set enforcement=fail to block, or add reviewed exceptions to ${ALLOWLIST})."
+        exit 0

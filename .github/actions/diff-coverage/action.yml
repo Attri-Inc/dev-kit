@@ -1,0 +1,132 @@
+name: 'Diff coverage gate'
+description: |
+  Computes patch/diff coverage — the percentage of the lines CHANGED in this PR
+  that are covered by tests — from a coverage report plus the git diff against the
+  base branch, using diff-cover. Self-contained (no external coverage SaaS).
+
+  Warn-first by default: when changed-line coverage is below the threshold it
+  emits a ::warning:: but does NOT fail. Set enforcement=fail to make it block.
+  Only runs on pull requests (it needs a base branch to diff against); no-ops on
+  push/other events and when the report is absent.
+author: 'Attri Inc'
+
+inputs:
+  report:
+    description: 'Path to the coverage report file (e.g. coverage.xml, lcov.info, coverage.out).'
+    required: true
+  format:
+    description: 'Report format: cobertura | lcov | jacoco | golang'
+    required: false
+    default: 'cobertura'
+  base-ref:
+    description: 'Base branch to diff against (usually github.base_ref). Empty → step no-ops.'
+    required: false
+    default: ''
+  min-coverage:
+    description: 'Minimum required diff coverage percent (0-100).'
+    required: false
+    default: '80'
+  enforcement:
+    description: 'warn (annotate, never fail) | fail (block when below min-coverage).'
+    required: false
+    default: 'warn'
+  src-roots:
+    description: 'Optional space-separated source roots to help path-match (golang/jacoco).'
+    required: false
+    default: ''
+
+outputs:
+  covered:
+    description: "'true' if changed-line coverage met the threshold, 'false' if below, '' if skipped."
+    value: ${{ steps.diffcov.outputs.covered }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: diffcov
+      shell: bash
+      env:
+        REPORT: ${{ inputs.report }}
+        FORMAT: ${{ inputs.format }}
+        BASE: ${{ inputs.base-ref }}
+        MIN: ${{ inputs.min-coverage }}
+        ENFORCE: ${{ inputs.enforcement }}
+        SRC_ROOTS: ${{ inputs.src-roots }}
+      run: |
+        set -uo pipefail
+        echo "covered=" >> "$GITHUB_OUTPUT"
+
+        # Diff coverage only makes sense on a PR — we need a base to diff against.
+        if [ -z "${BASE:-}" ]; then
+          echo "::notice::diff-coverage: no base ref (not a pull request) — skipping."
+          exit 0
+        fi
+        if [ ! -f "$REPORT" ]; then
+          echo "::warning::diff-coverage: report '$REPORT' not found — skipping (did tests run with coverage?)."
+          exit 0
+        fi
+
+        # Ensure the base branch + enough history for a merge-base are present
+        # (language jobs may use a shallow checkout).
+        git fetch --no-tags --quiet origin "$BASE" 2>/dev/null || true
+        git fetch --no-tags --quiet --deepen=300 origin "$BASE" 2>/dev/null || true
+
+        python -m pip install --quiet "diff-cover==9.2.0" || {
+          echo "::warning::diff-coverage: could not install diff-cover — skipping."
+          exit 0
+        }
+
+        # diff-cover speaks Cobertura/LCOV/JaCoCo; convert Go profiles first.
+        COMPARE_REPORT="$REPORT"
+        if [ "$FORMAT" = "golang" ]; then
+          go install github.com/boumenot/gocover-cobertura@latest 2>/dev/null || true
+          GOBIN="$(go env GOPATH)/bin"; export PATH="$GOBIN:$PATH"
+          if command -v gocover-cobertura >/dev/null 2>&1; then
+            gocover-cobertura < "$REPORT" > diff-cover-go.xml
+            # Go cobertura filenames are FULL module import paths
+            # (github.com/org/repo/pkg/foo.go), but git diff paths are repo-relative
+            # (pkg/foo.go). Strip the module prefix so diff-cover can match them,
+            # otherwise every changed line looks uncovered. (# is the sed delimiter
+            # so the slashes in the module path don't need escaping.)
+            MOD="$(go list -m 2>/dev/null | head -1)"
+            if [ -n "$MOD" ]; then
+              sed -i "s#filename=\"${MOD}/#filename=\"#g" diff-cover-go.xml
+            fi
+            COMPARE_REPORT="diff-cover-go.xml"
+          else
+            echo "::warning::diff-coverage: gocover-cobertura unavailable — skipping Go diff coverage."
+            exit 0
+          fi
+        fi
+
+        SRC_ARGS=()
+        if [ -n "${SRC_ROOTS:-}" ]; then
+          for r in $SRC_ROOTS; do SRC_ARGS+=( --src-roots "$r" ); done
+        fi
+
+        set +e
+        diff-cover "$COMPARE_REPORT" \
+          --compare-branch "origin/${BASE}" \
+          --fail-under "$MIN" \
+          --markdown-report diff-cover.md \
+          "${SRC_ARGS[@]}"
+        rc=$?
+        set -e
+
+        if [ -f diff-cover.md ]; then
+          { echo "## Diff coverage (changed lines)"; echo ""; cat diff-cover.md; } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [ "$rc" -eq 0 ]; then
+          echo "covered=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::diff-coverage: changed-line coverage meets the ${MIN}% threshold."
+          exit 0
+        fi
+
+        echo "covered=false" >> "$GITHUB_OUTPUT"
+        if [ "$ENFORCE" = "fail" ]; then
+          echo "::error::diff-coverage: changed-line coverage is below the ${MIN}% threshold."
+          exit 1
+        fi
+        echo "::warning::diff-coverage: changed-line coverage is below ${MIN}% (advisory — not blocking yet; set enforcement=fail to block)."
+        exit 0

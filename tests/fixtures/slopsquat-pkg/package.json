@@ -1,0 +1,8 @@
+{
+  "name": "slopsquat-fixture",
+  "version": "1.0.0",
+  "dependencies": {
+    "react": "^18.3.0",
+    "this-npm-pkg-definitely-does-not-exist-example-2026": "^1.0.0"
+  }
+}

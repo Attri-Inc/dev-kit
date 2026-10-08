@@ -1,0 +1,53 @@
+name: self-test
+
+# Dogfoods the kit on itself + runs the planted-bad-state fixtures in tests/fixtures.
+# Fails if a known-bad fixture passes, or a known-good fixture fails.
+
+# Cancel superseded runs on the same PR. Force-pushes during review
+# don't burn minutes on stale commits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+  id-token: write
+  attestations: write
+  actions: read
+
+jobs:
+  self-gate:
+    name: Self-gate (kit on itself)
+    uses: ./.github/workflows/gate.yml
+    with:
+      # Public repo: PRs from forks must never reach self-hosted runners.
+      runner: ubuntu-latest
+      tier: dev
+      languages: shell
+      fail-on: high
+    secrets: inherit
+
+  fixture-tests:
+    name: Bats fixture tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+      - name: Run fixture tests
+        run: bats tests/self-test.bats
+
+  test-lint-disable:
+    name: Test lint-disable-detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run unit tests
+        run: ./tests/test-lint-disable.sh

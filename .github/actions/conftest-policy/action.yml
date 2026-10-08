@@ -1,0 +1,91 @@
+name: 'Policy-as-code (Conftest / OPA)'
+description: |
+  Evaluates repository config (k8s manifests, Dockerfiles, `terraform plan` JSON,
+  any YAML/JSON) against the org's Rego policies using Conftest. Lets you encode
+  custom controls as versioned, reviewed code ("storage must be encrypted", "no
+  :latest images", "resources need a cost-center tag").
+
+  Consume-if-present: runs ONLY when the repo ships Rego under policy/ or
+  .config/policy/ — zero impact until adopted. Conftest runs from its pinned
+  Docker image (no curl|sh). Warn-first.
+author: 'Attri Inc'
+
+inputs:
+  policy-dir:
+    description: 'Rego policy directory. Empty = auto-detect policy/ then .config/policy/.'
+    required: false
+    default: ''
+  paths:
+    description: 'Space-separated files/dirs to test (default: repo root).'
+    required: false
+    default: '.'
+  enforcement:
+    description: 'warn (advisory, default) | fail (block on a policy violation).'
+    required: false
+    default: 'warn'
+  conftest-version:
+    description: 'Conftest Docker image tag.'
+    required: false
+    default: 'v0.56.0'
+
+runs:
+  using: 'composite'
+  steps:
+    - id: policy
+      shell: bash
+      env:
+        PDIR_IN: ${{ inputs.policy-dir }}
+        PATHS: ${{ inputs.paths }}
+        ENFORCE: ${{ inputs.enforcement }}
+        CONFTEST_VERSION: ${{ inputs.conftest-version }}
+      run: |
+        set -uo pipefail
+        PDIR="${PDIR_IN:-}"
+        if [ -z "$PDIR" ]; then
+          for d in policy .config/policy; do
+            if ls "$d"/*.rego >/dev/null 2>&1; then PDIR="$d"; break; fi
+          done
+        fi
+        if [ -z "$PDIR" ] || ! ls "$PDIR"/*.rego >/dev/null 2>&1; then
+          echo "::notice::conftest-policy: no Rego policies (policy/*.rego or .config/policy/*.rego) — skipping. Add policies to enable policy-as-code."
+          exit 0
+        fi
+        echo "::notice::conftest-policy: evaluating against '$PDIR'."
+
+        # conftest is a single static Go binary — no Docker daemon needed to
+        # evaluate local Rego policies. Self-hosted runner images preinstall it;
+        # download only when absent or when the version does not match the pin,
+        # so an explicit conftest-version is still honoured.
+        WANT="${CONFTEST_VERSION#v}"
+        HAVE="$(conftest --version 2>/dev/null | head -1 | awk '{print $2}' || true)"
+        if [ "$HAVE" = "$WANT" ]; then
+          echo "::notice::conftest-policy: conftest ${WANT} preinstalled."
+        else
+          echo "::notice::conftest-policy: installing conftest ${WANT} (found: ${HAVE:-none})."
+          curl -fsSL -o /tmp/conftest.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${WANT}/conftest_${WANT}_Linux_x86_64.tar.gz" || {
+              echo "::error::conftest-policy: download failed."; exit 1; }
+          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
+          sudo install -m 0755 /tmp/conftest /usr/local/bin/conftest
+          rm -f /tmp/conftest.tar.gz /tmp/conftest
+        fi
+        conftest --version | head -1
+
+        set +e
+        # shellcheck disable=SC2086  # PATHS is a deliberate space-separated arg list (caller-controlled)
+        conftest test --no-color -p "$PDIR" $PATHS | tee conftest-out.txt
+        rc=${PIPESTATUS[0]}
+        set -e
+
+        { echo "## Policy-as-code (Conftest)"; echo ""; echo '```'; tail -c 4000 conftest-out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$rc" -eq 0 ]; then
+          echo "::notice::conftest-policy: all policies passed."
+          exit 0
+        fi
+        if [ "$ENFORCE" = "fail" ]; then
+          echo "::error::conftest-policy: policy violation(s)."
+          exit 1
+        fi
+        echo "::warning::conftest-policy: policy violation(s) (advisory — set enforcement=fail to block)."
+        exit 0

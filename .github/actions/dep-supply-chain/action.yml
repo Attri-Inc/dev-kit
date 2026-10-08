@@ -1,0 +1,125 @@
+name: 'Dependency supply-chain guards (cooldown + confusion)'
+description: |
+  Two supply-chain guards on a PR's NEWLY-ADDED dependencies:
+    - min-release-age (cooldown): flags npm/PyPI packages whose latest release was
+      published < N days ago. Most malicious versions are yanked within days, so a
+      cooldown blocks them before discovery.
+    - dependency-confusion: when the repo uses internal-namespace packages
+      (`internal-scopes`) but does NOT pin a private registry, an attacker can
+      publish a public package of that name and your build resolves theirs.
+  Diff-scoped, warn-first. Registry errors fail-open (never block on flakiness).
+author: 'Attri Inc'
+
+inputs:
+  cooldown-days:
+    description: 'Flag dependencies whose latest release is younger than this many days.'
+    required: false
+    default: '7'
+  internal-scopes:
+    description: 'Comma/space-separated internal namespaces to check for confusion (e.g. "@acme,acme-"). Empty disables the check.'
+    required: false
+    default: ''
+  enforcement:
+    description: 'warn (advisory, default) | fail (block on a finding).'
+    required: false
+    default: 'warn'
+
+runs:
+  using: 'composite'
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        BASE: ${{ github.base_ref }}
+        COOLDOWN: ${{ inputs.cooldown-days }}
+        SCOPES: ${{ inputs.internal-scopes }}
+        ENFORCE: ${{ inputs.enforcement }}
+      run: |
+        set -uo pipefail
+        if [ -z "${BASE:-}" ]; then
+          echo "::notice::Not a PR — skipping dep-supply-chain."
+          exit 0
+        fi
+        git fetch origin "$BASE" --depth=50 2>/dev/null || true
+        NOW=$(date -u +%s)
+        FINDINGS=0; REPORT=""
+        flag() { REPORT+="| $1 | $2 |"$'\n'; FINDINGS=$((FINDINGS+1)); }
+
+        # age in days of an ISO-8601 timestamp (GNU date on Linux; BSD fallback).
+        age_days() {
+          local ts="$1" e
+          e=$(date -u -d "$ts" +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S' "${ts%%.*}" +%s 2>/dev/null || echo 0)
+          [ "$e" = 0 ] && { echo -1; return; }
+          echo $(( (NOW - e) / 86400 ))
+        }
+
+        # ── min-release-age: newly-added npm deps (package.json) ──
+        NPM_NEW="$(git diff "origin/${BASE}...HEAD" -- 'package.json' '**/package.json' 2>/dev/null \
+          | grep -E '^\+\s*"' | grep -vE '^\+\+\+' \
+          | grep -oE '"@?[a-z0-9._-]+(/[a-z0-9._-]+)?"\s*:' | tr -d '":' | sed 's/[[:space:]]//g' \
+          | grep -ivE '^(name|version|description|main|scripts|repository|author|license|engines|keywords|files|workspaces|type|private)$' | sort -u || true)"
+        for pkg in $NPM_NEW; do
+          [ -z "$pkg" ] && continue
+          http=$(curl -sS -m 8 -o /tmp/npm.json -w '%{http_code}' "https://registry.npmjs.org/${pkg}" 2>/dev/null || echo 000)
+          [ "$http" = "200" ] || continue
+          latest=$(jq -r '."dist-tags".latest // empty' /tmp/npm.json 2>/dev/null)
+          [ -z "$latest" ] && continue
+          ts=$(jq -r --arg v "$latest" '.time[$v] // empty' /tmp/npm.json 2>/dev/null)
+          [ -z "$ts" ] && continue
+          a=$(age_days "$ts")
+          if [ "$a" -ge 0 ] && [ "$a" -lt "$COOLDOWN" ]; then
+            flag "npm cooldown" "\`$pkg\` latest ($latest) published ${a}d ago (< ${COOLDOWN}d)"
+          fi
+        done
+
+        # ── min-release-age: newly-added PyPI deps (requirements / pyproject) ──
+        PY_NEW="$(git diff "origin/${BASE}...HEAD" -- '*requirements*.txt' 'pyproject.toml' 2>/dev/null \
+          | grep -E '^\+[^+]' \
+          | sed -E 's/^\+\s*//; s/[<>=!~;[].*//; s/#.*//; s/[",]//g; s/[[:space:]]//g' \
+          | grep -E '^[a-zA-Z][a-zA-Z0-9._-]*$' | sort -u || true)"
+        for pkg in $PY_NEW; do
+          [ -z "$pkg" ] && continue
+          http=$(curl -sS -m 8 -o /tmp/pypi.json -w '%{http_code}' "https://pypi.org/pypi/${pkg}/json" 2>/dev/null || echo 000)
+          [ "$http" = "200" ] || continue
+          ts=$(jq -r '[.releases[][]?.upload_time] | sort | last // empty' /tmp/pypi.json 2>/dev/null)
+          [ -z "$ts" ] && continue
+          a=$(age_days "$ts")
+          if [ "$a" -ge 0 ] && [ "$a" -lt "$COOLDOWN" ]; then
+            flag "pypi cooldown" "\`$pkg\` latest release published ${a}d ago (< ${COOLDOWN}d)"
+          fi
+        done
+
+        # ── dependency-confusion: internal scope used but no private registry pin ──
+        if [ -n "${SCOPES:-}" ]; then
+          for scope in ${SCOPES//,/ }; do
+            [ -z "$scope" ] && continue
+            if grep -rqsE "[\"']?${scope}" --include='package.json' --include='*requirements*.txt' --include='pyproject.toml' . 2>/dev/null; then
+              pinned=false
+              { [ -f .npmrc ] && grep -qsE "${scope}.*:registry=|registry=" .npmrc; } && pinned=true
+              { [ -f pip.conf ] || [ -f .pip/pip.conf ]; } && grep -rqs 'index-url' pip.conf .pip/pip.conf 2>/dev/null && pinned=true
+              if [ "$pinned" = false ]; then
+                flag "dependency-confusion" "internal scope \`${scope}\` is used but no private registry is pinned (.npmrc/pip.conf) — public packages of that name would resolve"
+              fi
+            fi
+          done
+        fi
+
+        if [ "$FINDINGS" -eq 0 ]; then
+          echo "::notice::✅ dep-supply-chain: no fresh-release or dependency-confusion findings."
+          exit 0
+        fi
+        {
+          echo "## Dependency supply-chain guards: $FINDINGS finding(s)"
+          echo ""
+          echo "| Check | Detail |"; echo "|---|---|"
+          printf '%s' "$REPORT"
+          echo ""
+          echo "**Cooldown:** a brand-new release may be a hijacked/typosquatted version — wait out the window or pin a known-good version. **Confusion:** pin your private registry for internal scopes."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$ENFORCE" = "fail" ]; then
+          echo "::error::dep-supply-chain: $FINDINGS finding(s)."
+          exit 1
+        fi
+        echo "::warning::dep-supply-chain: $FINDINGS finding(s) (advisory — set enforcement=fail to block)."
+        exit 0

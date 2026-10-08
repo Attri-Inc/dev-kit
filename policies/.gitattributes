@@ -1,0 +1,35 @@
+# Recommended .gitattributes — copy into a consumer repo root.
+# Eliminates CRLF/LF "works on my machine" bugs across Mac/Windows/Linux devs:
+# Git normalizes line endings on commit and checks out LF everywhere by default.
+
+* text=auto eol=lf
+
+# Scripts MUST be LF — CRLF makes them fail on Linux/CI runners
+# ("/usr/bin/env: 'bash\r': No such file or directory").
+*.sh   text eol=lf
+*.bash text eol=lf
+
+# Windows-native scripts MUST be CRLF.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Lockfiles + generated artifacts: keep LF, but collapse them in diffs/reviews.
+package-lock.json  linguist-generated=true -diff
+pnpm-lock.yaml     linguist-generated=true -diff
+yarn.lock          linguist-generated=true -diff
+uv.lock            linguist-generated=true -diff
+poetry.lock        linguist-generated=true -diff
+Cargo.lock         linguist-generated=true -diff
+go.sum             linguist-generated=true -diff
+
+# Binaries — never normalize line endings.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.woff  binary
+*.woff2 binary
+*.lockb binary

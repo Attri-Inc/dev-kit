@@ -1,0 +1,4 @@
+# Required reviewer for every change to the kit.
+# Apply via a ruleset: "Require review from Code Owners".
+
+*       @harsh-attri @sattyamj-attri

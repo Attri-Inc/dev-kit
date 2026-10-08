@@ -1,0 +1,214 @@
+name: 'Migration safety check'
+description: 'Flags risky DDL/DML in changed migration files. Hard-fails on destructive ops (DROP, TRUNCATE, NOT NULL); advisory-only for context-dependent risks (untimed indexes), with new-table awareness.'
+author: 'Attri Inc'
+
+inputs:
+  migration-globs:
+    description: 'Newline-separated globs identifying migration files'
+    required: false
+    default: |
+      **/migrations/**/*.sql
+      **/migrations/**/*.py
+      **/alembic/versions/*.py
+      **/db/migrate/*.rb
+      **/prisma/migrations/**/*.sql
+  base-ref:
+    description: 'Base ref to diff against'
+    required: false
+    default: ''
+  strict-warnings:
+    description: 'When true, advisory warnings (e.g. untimed CREATE INDEX) also fail the check. Default false — warnings are reported but do not block.'
+    required: false
+    default: 'false'
+  approval-label:
+    description: 'PR label that waives a hard failure after DBA sign-off.'
+    required: false
+    default: 'migration: dba-approved'
+
+runs:
+  using: 'composite'
+  steps:
+    - id: check
+      shell: bash
+      env:
+        # Pass labels via env (not inline interpolation) so JSON quotes and
+        # arbitrary label-name characters can never break bash quoting or
+        # inject shell (see pr-size-guard / #39). Empty array when not a PR.
+        PR_LABELS_JSON: ${{ github.event_name == 'pull_request' && toJson(github.event.pull_request.labels) || '[]' }}
+        EVENT_NAME: ${{ github.event_name }}
+        APPROVAL_LABEL: ${{ inputs.approval-label }}
+      run: |
+        set -euo pipefail
+
+        BASE="${{ inputs.base-ref }}"
+        if [ -z "$BASE" ]; then
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch origin "${GITHUB_BASE_REF}" --depth=50 2>/dev/null || true
+            BASE="origin/${GITHUB_BASE_REF}"
+          else
+            BASE="HEAD~1"
+          fi
+        fi
+
+        if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+          BASE="HEAD~1"
+        fi
+
+        # Build a list of changed migration files
+        GLOBS='${{ inputs.migration-globs }}'
+        ARGS=()
+        while IFS= read -r pat; do
+          [ -z "$pat" ] && continue
+          ARGS+=("$pat")
+        done <<< "$GLOBS"
+
+        CHANGED=$(git diff --name-only "$BASE...HEAD" -- "${ARGS[@]}" 2>/dev/null || true)
+        if [ -z "$CHANGED" ]; then
+          echo "::notice::No migration files changed."
+          exit 0
+        fi
+
+        # Files added by this PR (status A). An untimed index in a brand-new
+        # migration file is creating an index on a fresh/empty table — there is
+        # nothing to lock — so it must not be treated like an ALTER on a live table.
+        ADDED=$(git diff --name-status "$BASE...HEAD" -- "${ARGS[@]}" 2>/dev/null | awk '$1 ~ /^A/ {print $2}')
+        is_added() { printf '%s\n' "$ADDED" | grep -qxF "$1"; }
+
+        echo "Migration files changed:"
+        echo "$CHANGED"
+        echo ""
+
+        ERRORS=0   # destructive / locking ops → hard fail
+        WARN=0     # context-dependent risks → advisory
+        REPORT=""
+        while IFS= read -r f; do
+          [ -z "$f" ] && continue
+          [ -f "$f" ] || continue
+          DIFF=$(git diff "$BASE...HEAD" -- "$f")
+
+          # A new migration file, or a diff that creates the table in the same
+          # change, means an index/DDL here targets a fresh table — safe context.
+          NEW_CONTEXT=false
+          if is_added "$f"; then
+            NEW_CONTEXT=true
+          elif echo "$DIFF" | grep -iE '^\+.*\bCREATE\s+TABLE\b' > /dev/null; then
+            NEW_CONTEXT=true
+          fi
+
+          # ── Hard failures: destructive or table-locking on live data ──
+          # Pattern 1: DROP TABLE / DROP COLUMN / DROP INDEX / DROP SCHEMA
+          if echo "$DIFF" | grep -iE '^\+.*\b(DROP\s+(TABLE|COLUMN|INDEX|SCHEMA))\b' > /dev/null; then
+            REPORT+="❌ $f  →  contains DROP TABLE/COLUMN/INDEX/SCHEMA"$'\n'
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          # Pattern 2: NOT NULL added without default on existing column
+          if echo "$DIFF" | grep -iE '^\+.*\bALTER\s+(TABLE|COLUMN).+\bNOT\s+NULL\b' | grep -ivE 'DEFAULT' > /dev/null; then
+            REPORT+="❌ $f  →  ALTER ... NOT NULL without DEFAULT (locks table on populated rows)"$'\n'
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          # Pattern 4: TRUNCATE
+          if echo "$DIFF" | grep -iE '^\+.*\bTRUNCATE\b' > /dev/null; then
+            REPORT+="❌ $f  →  contains TRUNCATE"$'\n'
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          # Pattern 5: DELETE FROM without WHERE — statement-aware.
+          # The previous single-line pattern required the table name AND the
+          # terminating ';' on the same added line, so a DELETE spanning lines
+          # evaded the gate. Normalize the added SQL into one statement stream
+          # (strip the leading '+', drop '-- comments', collapse newlines),
+          # append a sentinel ';' to terminate a trailing statement, then
+          # extract each ';'-bounded DELETE and flag any without a WHERE. (audit H3)
+          ADDED_SQL=$(echo "$DIFF" | grep '^+' | sed -e 's/^+//' -e 's/--.*$//' | tr '\n' ' ' | tr -s ' ')
+          ADDED_SQL="${ADDED_SQL}; "
+          if echo "$ADDED_SQL" | grep -ioE 'DELETE[[:space:]]+FROM[[:space:]]+[^;]*;' | grep -ivE '\bWHERE\b' | grep -q .; then
+            REPORT+="❌ $f  →  DELETE FROM without WHERE clause"$'\n'
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          # ── Advisory warnings: risky only on a populated, pre-existing table ──
+          # Pattern 3: CREATE INDEX without CONCURRENTLY (Postgres)
+          if echo "$DIFF" | grep -iE '^\+.*\bCREATE\s+(UNIQUE\s+)?INDEX\b' | grep -iv 'CONCURRENTLY' > /dev/null; then
+            if [ "$NEW_CONTEXT" = "true" ]; then
+              echo "::notice::$f — CREATE INDEX without CONCURRENTLY on a new/just-created table (safe; not flagged)."
+            else
+              REPORT+="⚠️  $f  →  CREATE INDEX without CONCURRENTLY (blocks writes on a populated table)"$'\n'
+              WARN=$((WARN + 1))
+            fi
+          fi
+
+          # Alembic / Python ORM patterns
+          if echo "$f" | grep -qE '\.py$'; then
+            if echo "$DIFF" | grep -E '^\+.*\bop\.(drop_table|drop_column|drop_index|drop_constraint)\b' > /dev/null; then
+              REPORT+="❌ $f  →  op.drop_*() in Alembic migration"$'\n'
+              ERRORS=$((ERRORS + 1))
+            fi
+            if echo "$DIFF" | grep -E '^\+.*\bop\.alter_column\b' | grep -E 'nullable\s*=\s*False' | grep -v 'server_default' > /dev/null; then
+              REPORT+="❌ $f  →  op.alter_column(nullable=False) without server_default"$'\n'
+              ERRORS=$((ERRORS + 1))
+            fi
+            if echo "$DIFF" | grep -E '^\+.*\bop\.create_index\b' | grep -v 'postgresql_concurrently=True' > /dev/null; then
+              if [ "$NEW_CONTEXT" = "true" ]; then
+                echo "::notice::$f — op.create_index on a new table (safe; not flagged)."
+              else
+                REPORT+="⚠️  $f  →  op.create_index without postgresql_concurrently=True"$'\n'
+                WARN=$((WARN + 1))
+              fi
+            fi
+            # Django migrations
+            if echo "$DIFF" | grep -E '^\+.*\bmigrations\.(DeleteModel|RemoveField|AlterField)\b' > /dev/null; then
+              REPORT+="⚠️  $f  →  Django migrations.DeleteModel/RemoveField/AlterField — verify with DBA"$'\n'
+              WARN=$((WARN + 1))
+            fi
+          fi
+        done <<< "$CHANGED"
+
+        # Does the PR carry the DBA sign-off label? Labels come from env
+        # (PR_LABELS_JSON) — no inline interpolation — see env: block above.
+        has_approval=false
+        if [ "$EVENT_NAME" = "pull_request" ]; then
+          labels=$(printf '%s' "$PR_LABELS_JSON" | jq -r '.[].name' 2>/dev/null || echo "")
+          if echo "$labels" | grep -qxF "$APPROVAL_LABEL"; then
+            has_approval=true
+          fi
+        fi
+
+        # Promote warnings to blocking when strict-warnings is on.
+        BLOCKING=$ERRORS
+        if [ "${{ inputs.strict-warnings }}" = "true" ]; then
+          BLOCKING=$((ERRORS + WARN))
+        fi
+
+        if [ "$((ERRORS + WARN))" -gt 0 ]; then
+          {
+            echo "## Migration safety: $ERRORS error(s), $WARN warning(s)"
+            echo ""
+            echo '```'
+            echo "$REPORT"
+            echo '```'
+            echo ""
+            if [ "$BLOCKING" -gt 0 ]; then
+              echo "**Fix, or get explicit DBA approval before merging.** Apply the \`$APPROVAL_LABEL\` label after sign-off."
+            else
+              echo "_Advisory only — these did not block the gate. Review before merging large tables._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        # Print warnings to the log regardless of blocking status.
+        if [ "$WARN" -gt 0 ]; then
+          echo "::warning::Migration safety found $WARN advisory warning(s) (non-blocking unless strict-warnings=true)."
+        fi
+
+        if [ "$BLOCKING" -gt 0 ]; then
+          if [ "$has_approval" = "true" ]; then
+            echo "::notice::$APPROVAL_LABEL label applied — migration findings waived for this PR."
+            exit 0
+          fi
+          echo "::error::Migration safety check found $ERRORS blocking issue(s)."
+          exit 1
+        fi
+
+        echo "::notice::✅ Migration files look safe."

@@ -1,0 +1,134 @@
+name: 'Committer identity check'
+description: 'Rejects commits whose author or committer email is outside the allowed corporate domains.'
+author: 'Attri Inc'
+
+inputs:
+  allowed-domains:
+    description: 'Comma-separated allowed email domains (no @, just domain). Empty turns the check off.'
+    required: false
+    default: ''
+  tier:
+    description: 'Tier (dev/qa/uat/main) — main is strictest'
+    required: false
+    default: 'dev'
+  enforcement:
+    description: 'warn = never fail; fail = fail at qa/uat/main per policy'
+    required: false
+    default: 'fail'
+  base-ref:
+    description: 'Base ref to compare against (default: PR base or HEAD~1)'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - id: check
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # No allowlist means there is no email-domain policy to enforce.
+        # Without this, every commit would be a violation.
+        if [ -z '${{ inputs.allowed-domains }}' ]; then
+          echo "::notice::identity-check skipped: allowed-domains is empty."
+          exit 0
+        fi
+
+        # Determine commit range
+        if [ -n "${{ inputs.base-ref }}" ]; then
+          BASE="${{ inputs.base-ref }}"
+        elif [ -n "${GITHUB_BASE_REF:-}" ]; then
+          BASE="origin/${GITHUB_BASE_REF}"
+          git fetch origin "${GITHUB_BASE_REF}" --depth=50 2>/dev/null || true
+        else
+          BASE="HEAD~1"
+        fi
+
+        if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+          BASE="HEAD~1"
+        fi
+
+        echo "Comparing $BASE..HEAD"
+        COMMITS=$(git rev-list "$BASE..HEAD" 2>/dev/null || git rev-list --max-count=20 HEAD)
+
+        if [ -z "$COMMITS" ]; then
+          echo "No new commits to check."
+          exit 0
+        fi
+
+        ALLOWED='${{ inputs.allowed-domains }}'
+        TIER='${{ inputs.tier }}'
+        VIOLATIONS=0
+        REPORT=""
+
+        # Patterns we always reject (non-corporate)
+        REJECT_LOCAL='\.local$'
+        REJECT_IP='@[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
+        REJECT_GMAIL='@gmail\.com$'
+        REJECT_YAHOO='@yahoo\.com$'
+        REJECT_OUTLOOK='@(outlook|hotmail|live)\.com$'
+
+        check_email() {
+          local email="$1"
+          local kind="$2"
+          local sha="$3"
+
+          # Allowlist check first
+          local domain="${email##*@}"
+          if echo "$ALLOWED" | tr ',' '\n' | grep -qx "$domain"; then
+            return 0
+          fi
+
+          local reason=""
+          if   echo "$email" | grep -Eq "$REJECT_LOCAL";   then reason="local-machine email (.local)"
+          elif echo "$email" | grep -Eq "$REJECT_IP";      then reason="raw IP hostname"
+          elif echo "$email" | grep -Eq "$REJECT_GMAIL";   then reason="personal Gmail"
+          elif echo "$email" | grep -Eq "$REJECT_YAHOO";   then reason="personal Yahoo"
+          elif echo "$email" | grep -Eq "$REJECT_OUTLOOK"; then reason="personal Outlook/Hotmail"
+          else                                                  reason="domain not in allowlist ($domain)"
+          fi
+
+          REPORT+="❌ $sha  $kind=$email  →  $reason"$'\n'
+          VIOLATIONS=$((VIOLATIONS + 1))
+        }
+
+        for sha in $COMMITS; do
+          AE=$(git log -1 --format='%ae' "$sha")
+          CE=$(git log -1 --format='%ce' "$sha")
+          check_email "$AE" "author"    "${sha:0:7}"
+          [ "$AE" != "$CE" ] && check_email "$CE" "committer" "${sha:0:7}"
+        done
+
+        if [ "$VIOLATIONS" -gt 0 ]; then
+          {
+            echo "## Identity check failed: $VIOLATIONS violation(s)"
+            echo ""
+            echo '```'
+            echo "$REPORT"
+            echo '```'
+            echo ""
+            echo "**Fix on your machine:**"
+            echo '```bash'
+            echo "git config --global user.email 'you@<an allowed domain>'"
+            echo "git config --global user.name  'Your Name'"
+            echo '```'
+            echo ""
+            echo "Then amend or rewrite the offending commits before re-pushing."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          ENFORCE='${{ inputs.enforcement }}'
+          if [ "$ENFORCE" = "warn" ]; then
+            echo "::warning::Identity check found $VIOLATIONS violation(s) (enforcement=warn — not failing)."
+            exit 0
+          fi
+          echo "::error::Identity check failed: $VIOLATIONS commit(s) with disallowed author/committer email."
+          if [ "$TIER" = "main" ] || [ "$TIER" = "qa" ] || [ "$TIER" = "uat" ]; then
+            exit 1
+          else
+            echo "::warning::Failing soft on tier=$TIER. Will hard-fail at qa/uat/main."
+            exit 0
+          fi
+        fi
+
+        echo "✅ All commits use approved author/committer emails."

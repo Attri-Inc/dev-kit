@@ -1,0 +1,86 @@
+name: 'Build artifact for attestation'
+description: |
+  Produces a buildable artifact per-language for SBOM + Sigstore attestation.
+  Falls back to a tarball of the source tree if no language-specific build is possible.
+author: 'Attri Inc'
+
+inputs:
+  build-command:
+    description: 'Optional override build command'
+    required: false
+    default: ''
+  languages:
+    description: 'Comma-separated detected languages'
+    required: true
+
+outputs:
+  artifact-path:
+    description: 'Path (or glob) of the produced artifact'
+    value: ${{ steps.build.outputs.artifact-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: build
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dist
+        OVERRIDE='${{ inputs.build-command }}'
+        LANGS='${{ inputs.languages }}'
+
+        if [ -n "$OVERRIDE" ]; then
+          echo "::notice::Running override build: $OVERRIDE"
+          eval "$OVERRIDE"
+          echo "artifact-path=dist/" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Per-language defaults
+        if echo "$LANGS" | grep -q python; then
+          if [ -f pyproject.toml ]; then
+            python -m pip install --quiet build
+            python -m build --outdir dist/
+          fi
+        fi
+        if echo "$LANGS" | grep -q typescript; then
+          if [ -f package.json ] && jq -e '.scripts.build' package.json > /dev/null 2>&1; then
+            # Unlike the _typescript.yml jobs, nothing has set pnpm up here,
+            # so corepack still earns its place — but the one bundled with Node
+            # only knows pnpm 10's `bin/pnpm.cjs` and cannot launch pnpm 11+.
+            if [ -f pnpm-lock.yaml ]; then npm i -g --silent corepack@latest && corepack enable && pnpm install --frozen-lockfile && pnpm build
+            elif [ -f yarn.lock ]; then yarn install --frozen-lockfile && yarn build
+            else npm ci && npm run build
+            fi
+            tar -czf dist/typescript-build.tgz \
+              $(ls -d dist build .next out 2>/dev/null | grep -v '^dist$' | head -3)
+          fi
+        fi
+        if echo "$LANGS" | grep -q go; then
+          if [ -f go.mod ]; then
+            CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o dist/$(basename "$(pwd)") ./...
+          fi
+        fi
+        if echo "$LANGS" | grep -q java; then
+          if [ -f pom.xml ]; then
+            mvn -B -ntp -DskipTests package
+            cp target/*.jar dist/ 2>/dev/null || true
+          elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+            ./gradlew --no-daemon -x test build
+            find . -name "*.jar" -path "*/build/libs/*" -exec cp {} dist/ \; 2>/dev/null || true
+          fi
+        fi
+        if echo "$LANGS" | grep -q csharp; then
+          dotnet publish -c Release -o dist/
+        fi
+
+        # Fallback: source tarball if dist is empty
+        if [ -z "$(ls -A dist/ 2>/dev/null)" ]; then
+          echo "::notice::No language artifact produced — creating source tarball."
+          tar --exclude='.git' --exclude='node_modules' --exclude='.terraform' \
+              --exclude='dist' -czf dist/source.tgz . 2>/dev/null || true
+        fi
+
+        echo "artifact-path=dist/" >> "$GITHUB_OUTPUT"
+        echo "Built artifacts:"
+        ls -la dist/

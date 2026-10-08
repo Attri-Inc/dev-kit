@@ -1,0 +1,172 @@
+name: 'Vulnerability prioritization (CISA KEV + EPSS)'
+description: |
+  Re-ranks dependency CVEs by REAL-WORLD exploitability instead of CVSS alone, so
+  teams fix "the few that matter" not "the 1,200 highs". Trivy enumerates CVEs
+  across all ecosystems; each is enriched with:
+    - CISA KEV membership (actively exploited in the wild → FIX NOW), and
+    - EPSS score (FIRST.org daily probability of exploitation in the next 30 days).
+  Both feeds are free / no-auth. Warn-first; by default blocks only on a KEV hit.
+author: 'Attri Inc'
+
+inputs:
+  path:
+    description: 'Directory to scan.'
+    required: false
+    default: '.'
+  enforcement:
+    description: 'warn (advisory, default) | fail (block per fail-on).'
+    required: false
+    default: 'warn'
+  fail-on:
+    description: 'What blocks when enforcement=fail: kev (default) | epss | both.'
+    required: false
+    default: 'kev'
+  epss-threshold:
+    description: 'EPSS probability (0-1) at/above which a CVE is "likely exploited".'
+    required: false
+    default: '0.10'
+
+outputs:
+  kev-count:
+    description: 'Number of scanned CVEs present on the CISA KEV catalog.'
+    value: ${{ steps.prioritize.outputs.kev-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    # Binary instead of trivy-action (which runs Trivy in a container and needs
+    # a Docker daemon). Preinstalled on self-hosted images — see license-check.
+    - name: Check for Trivy
+      id: trivy
+      shell: bash
+      env:
+        WANT: '0.74.0'
+      run: |
+        set -uo pipefail
+        have="$(trivy --version 2>/dev/null | head -1 | awk '{print $2}' || true)"
+        if [ "$have" = "$WANT" ]; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::Trivy ${WANT} not present (found: ${have:-none}) — installing."
+        fi
+
+    - name: Install Trivy
+      if: steps.trivy.outputs.present != 'true'
+      uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+      with:
+        version: v0.74.0
+        cache: true
+
+    - name: Trivy vuln scan (enumerate CVEs)
+      shell: bash
+      env:
+        SCAN_PATH: ${{ inputs.path }}
+      run: |
+        set -uo pipefail
+        # This job's whole purpose is CVE enumeration, so a stale DB would give
+        # a quietly wrong answer. Skip the update only for a DB younger than the
+        # daily image rebuild; otherwise let Trivy fetch a current one.
+        SKIP_DB=""
+        DB="${HOME}/.cache/trivy/db/trivy.db"
+        if [ -f "$DB" ] && [ -z "$(find "$DB" -mtime +1 2>/dev/null)" ]; then
+          SKIP_DB="--skip-db-update"
+          echo "::notice::Using baked Trivy DB (fresh) — skipping DB update."
+        fi
+        # shellcheck disable=SC2086  # SKIP_DB is a deliberate optional flag
+        trivy fs $SKIP_DB \
+          --scanners vuln \
+          --format json \
+          --output trivy-vuln.json \
+          --exit-code 0 \
+          --severity HIGH,CRITICAL \
+          "${SCAN_PATH}"
+
+    - name: Prioritize by KEV + EPSS
+      id: prioritize
+      shell: bash
+      env:
+        ENFORCE: ${{ inputs.enforcement }}
+        FAILON: ${{ inputs.fail-on }}
+        THRESH: ${{ inputs.epss-threshold }}
+      run: |
+        set -uo pipefail
+        echo "kev-count=0" >> "$GITHUB_OUTPUT"
+        if [ ! -f trivy-vuln.json ]; then
+          echo "::notice::vuln-prioritize: no Trivy report (no recognized dependencies?) — skipping."
+          exit 0
+        fi
+
+        mapfile -t CVES < <(jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID' trivy-vuln.json 2>/dev/null | grep -E '^CVE-' | sort -u)
+        if [ "${#CVES[@]}" -eq 0 ]; then
+          echo "::notice::vuln-prioritize: no CVE-identified HIGH/CRITICAL vulns."
+          exit 0
+        fi
+
+        # CISA KEV catalog (free, no auth). Fail-open on network error.
+        KEV_SET="$(curl -sS -m 25 https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json 2>/dev/null | jq -r '.vulnerabilities[]?.cveID' 2>/dev/null | sort -u || true)"
+        if [ -z "$KEV_SET" ]; then
+          echo "::warning::vuln-prioritize: could not fetch CISA KEV catalog — KEV enrichment skipped (fail-open)."
+        fi
+
+        # EPSS scores (FIRST.org), batched ~80 CVEs/request.
+        EPSS_TMP="$(mktemp)"; BATCH=()
+        flush_epss() {
+          [ "${#BATCH[@]}" -eq 0 ] && return 0
+          local list; list="$(IFS=,; echo "${BATCH[*]}")"
+          curl -sS -m 25 "https://api.first.org/data/v1/epss?cve=${list}" 2>/dev/null \
+            | jq -r '.data[]? | "\(.cve)\t\(.epss)"' >> "$EPSS_TMP" 2>/dev/null || true
+          BATCH=()
+        }
+        n=0
+        for c in "${CVES[@]}"; do BATCH+=("$c"); n=$((n+1)); [ "$((n % 80))" -eq 0 ] && flush_epss; done
+        flush_epss
+
+        epss_of() { awk -F'\t' -v c="$1" '$1==c{print $2; found=1} END{if(!found)print "0"}' "$EPSS_TMP" | head -1; }
+        is_kev()  { printf '%s\n' "$KEV_SET" | grep -qxF "$1"; }
+
+        KEV_HITS=(); HIGH_EPSS=(); REST=0
+        for c in "${CVES[@]}"; do
+          e="$(epss_of "$c")"; [ -z "$e" ] && e=0
+          if is_kev "$c"; then
+            KEV_HITS+=("$c|$e")
+          elif awk "BEGIN{exit !(${e:-0} >= ${THRESH})}" 2>/dev/null; then
+            HIGH_EPSS+=("$c|$e")
+          else
+            REST=$((REST + 1))
+          fi
+        done
+        echo "kev-count=${#KEV_HITS[@]}" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "## Vulnerability prioritization — CISA KEV + EPSS"
+          echo ""
+          echo "- Total HIGH/CRITICAL CVEs: **${#CVES[@]}**"
+          echo "- 🔴 On CISA KEV (actively exploited — **FIX NOW**): **${#KEV_HITS[@]}**"
+          echo "- 🟠 EPSS ≥ ${THRESH} (likely exploited soon): **${#HIGH_EPSS[@]}**"
+          echo "- ⚪ Lower real-world priority: ${REST}"
+          if [ "${#KEV_HITS[@]}" -gt 0 ]; then
+            echo ""; echo "### 🔴 Fix now (CISA KEV)"
+            for h in "${KEV_HITS[@]}"; do echo "- \`${h%%|*}\` (EPSS ${h#*|})"; done
+          fi
+          if [ "${#HIGH_EPSS[@]}" -gt 0 ]; then
+            echo ""; echo "### 🟠 High EPSS"
+            for h in "${HIGH_EPSS[@]}"; do echo "- \`${h%%|*}\` (EPSS ${h#*|})"; done
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        for h in "${KEV_HITS[@]}"; do echo "::warning::vuln-prioritize: ${h%%|*} is on CISA KEV (actively exploited) — fix now."; done
+
+        block=false
+        case "$FAILON" in
+          kev)  [ "${#KEV_HITS[@]}" -gt 0 ] && block=true ;;
+          epss) [ "${#HIGH_EPSS[@]}" -gt 0 ] && block=true ;;
+          both) { [ "${#KEV_HITS[@]}" -gt 0 ] || [ "${#HIGH_EPSS[@]}" -gt 0 ]; } && block=true ;;
+        esac
+
+        if [ "$ENFORCE" = "fail" ] && [ "$block" = true ]; then
+          echo "::error::vuln-prioritize: actively-exploited / high-EPSS CVE(s) present (fail-on=${FAILON})."
+          exit 1
+        fi
+        echo "::notice::vuln-prioritize: ${#KEV_HITS[@]} KEV, ${#HIGH_EPSS[@]} high-EPSS (advisory; set enforcement=fail to block)."
+        exit 0

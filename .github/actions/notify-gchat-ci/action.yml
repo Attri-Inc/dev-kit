@@ -1,0 +1,124 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-action.json
+name: 'Google Chat CI-failure notification'
+description: |
+  Posts a Google Chat message when a gate run fails. Builds a cardsV2
+  message (repo, branch, commit, author, the jobs/steps that failed, and a
+  link to the run) and POSTs it to a Google Chat incoming webhook.
+
+  Used by `gate.yml`'s `notify-gchat` job. The job only invokes this action
+  when the run already contains a failure, so the action assumes failure and
+  focuses on describing it. If `webhook_url` is empty the action no-ops, so
+  repos without the org secret silently skip notification.
+author: 'Attri Inc'
+
+inputs:
+  webhook_url:
+    description: 'Google Chat incoming webhook URL (passed in by gate.yml).'
+    required: true
+  github_token:
+    description: 'Token with actions:read, used to look up which jobs failed.'
+    required: true
+  run_id:
+    description: 'Run ID to inspect (defaults to the current run).'
+    required: false
+    default: ''
+  repo:
+    description: 'Owner/repo identifier (defaults to GITHUB_REPOSITORY).'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Post CI failure to Google Chat
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        GCHAT_WEBHOOK: ${{ inputs.webhook_url }}
+        REPO: ${{ inputs.repo != '' && inputs.repo || github.repository }}
+        REF: ${{ github.ref_name }}
+        SHA: ${{ github.sha }}
+        ACTOR: ${{ github.actor }}
+        SERVER_URL: ${{ github.server_url }}
+        RUN_NUMBER: ${{ github.run_number }}
+        INPUT_RUN_ID: ${{ inputs.run_id }}
+        DEFAULT_RUN_ID: ${{ github.run_id }}
+        COMMIT_MSG: ${{ github.event.head_commit.message }}
+      run: |
+        set -euo pipefail
+
+        # No webhook configured for this repo/org → nothing to do.
+        if [ -z "${GCHAT_WEBHOOK:-}" ]; then
+          echo "::notice::GOOGLE_CHAT_WEBHOOK_URL not set — skipping Google Chat notification."
+          exit 0
+        fi
+
+        RUN_ID="${INPUT_RUN_ID:-}"
+        [ -z "$RUN_ID" ] && RUN_ID="$DEFAULT_RUN_ID"
+
+        RUN_URL="${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
+        SHORT_SHA="${SHA:0:7}"
+        COMMIT_TITLE="$(printf '%s' "${COMMIT_MSG:-}" | head -n1)"
+        [ -z "$COMMIT_TITLE" ] && COMMIT_TITLE="(no commit message)"
+
+        # Ask the API which jobs failed and which step broke each one. The gate
+        # fans out to many reusable sub-workflow jobs, so this reads the *whole*
+        # run, not just this job.
+        JOBS_JSON="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" --paginate 2>/dev/null || echo '{"jobs":[]}')"
+
+        FAILED="$(printf '%s' "$JOBS_JSON" | jq -r '
+          [.jobs[]
+            | select(.conclusion == "failure" or .conclusion == "timed_out")
+            | {name, step: ([.steps[]? | select(.conclusion == "failure" or .conclusion == "timed_out")][0].name // "—")}
+          ] as $f
+          | if ($f | length) == 0 then "Unknown (no failed job reported)"
+            else ($f | map("• \(.name) → \(.step)") | join("\n"))
+            end')"
+
+        # Assemble the cardsV2 payload with jq so all text is escaped safely.
+        PAYLOAD="$(jq -n \
+          --arg repo "$REPO" \
+          --arg ref "$REF" \
+          --arg sha "$SHORT_SHA" \
+          --arg actor "$ACTOR" \
+          --arg commit "$COMMIT_TITLE" \
+          --arg failed "$FAILED" \
+          --arg runurl "$RUN_URL" \
+          --arg runnum "$RUN_NUMBER" \
+          '{
+            cardsV2: [{
+              cardId: "attri-ci-failure",
+              card: {
+                header: {
+                  title: "🔴 CI Failed",
+                  subtitle: $repo,
+                  imageType: "CIRCLE",
+                  imageUrl: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png"
+                },
+                sections: [{
+                  widgets: [
+                    { decoratedText: { topLabel: "Branch",       text: $ref } },
+                    { decoratedText: { topLabel: "Commit",       text: ($sha + " — " + $commit) } },
+                    { decoratedText: { topLabel: "Triggered by", text: $actor } },
+                    { decoratedText: { topLabel: "Failed jobs",  text: $failed, wrapText: true } },
+                    { buttonList: { buttons: [
+                        { text: ("View run #" + $runnum), onClick: { openLink: { url: $runurl } } }
+                    ] } }
+                  ]
+                }]
+              }
+            }]
+          }')"
+
+        HTTP_CODE="$(curl -sS -o /tmp/gchat-resp.txt -w '%{http_code}' \
+          -X POST "$GCHAT_WEBHOOK" \
+          -H 'Content-Type: application/json; charset=UTF-8' \
+          -d "$PAYLOAD")"
+
+        if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+          echo "::notice::Posted CI-failure notification to Google Chat (HTTP $HTTP_CODE)."
+        else
+          # Don't fail the run just because notification failed — the gate has
+          # already recorded the real failure. Surface it as a warning instead.
+          echo "::warning::Google Chat notification failed (HTTP $HTTP_CODE): $(cat /tmp/gchat-resp.txt)"
+        fi

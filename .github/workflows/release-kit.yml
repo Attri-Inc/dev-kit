@@ -1,0 +1,32 @@
+name: release-kit
+
+# On every push to main: publish an SBOM of the kit, in both CycloneDX and SPDX.
+#
+# No tags, no version bumps, no CHANGELOG PRs. The kit tracks main: merge to
+# main = ship to every consumer on their next CI run. Version tags would not
+# freeze the kit anyway — gate.yml loads its composite actions from @main.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # sbom-action attaches each file to the run as an artifact itself,
+      # so there is no separate upload step.
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          format: spdx-json
+          output-file: sbom.spdx.json

@@ -1,0 +1,82 @@
+name: 'MCP server allowlist'
+description: |
+  Enforces an org allowlist of approved MCP (Model Context Protocol) servers
+  declared in .mcp.json / mcp_servers.json / .cursor/mcp.json. Unreviewed MCP
+  servers are a supply-chain hole — a malicious server can exfiltrate data or run
+  commands during normal agent use. Flags any configured server whose name or
+  command is not on the allowlist. With an empty allowlist it INVENTORIES the
+  servers found (so you can build the list). Warn-first.
+author: 'Attri Inc'
+
+inputs:
+  allowlist:
+    description: 'Comma/space-separated approved MCP server names or command basenames (e.g. "github,filesystem,npx"). Empty = inventory only.'
+    required: false
+    default: ''
+  enforcement:
+    description: 'warn (advisory, default) | fail (block on a non-allowlisted server).'
+    required: false
+    default: 'warn'
+
+runs:
+  using: 'composite'
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        ALLOW: ${{ inputs.allowlist }}
+        ENFORCE: ${{ inputs.enforcement }}
+      run: |
+        set -uo pipefail
+        mapfile -t CONFIGS < <(git ls-files 2>/dev/null | grep -E '(^|/)(\.mcp\.json|mcp_servers\.json|\.cursor/mcp\.json)$' || true)
+        if [ "${#CONFIGS[@]}" -eq 0 ]; then
+          echo "::notice::mcp-allowlist: no MCP config files — skipping."
+          exit 0
+        fi
+
+        # Normalize allowlist into newline tokens.
+        ALLOW_TOKENS="$(printf '%s' "${ALLOW:-}" | tr ', ' '\n' | sed '/^$/d')"
+        allowed() { [ -n "$ALLOW_TOKENS" ] && printf '%s\n' "$ALLOW_TOKENS" | grep -qxiF "$1"; }
+
+        FOUND=(); VIOLATIONS=()
+        for cfg in "${CONFIGS[@]}"; do
+          [ -f "$cfg" ] || continue
+          while IFS=$'\t' read -r name cmd; do
+            [ -z "$name" ] && continue
+            base="$(basename "${cmd:-}")"
+            FOUND+=("$cfg: $name (${cmd:-?})")
+            if [ -n "$ALLOW_TOKENS" ]; then
+              if ! allowed "$name" && ! allowed "$base"; then
+                VIOLATIONS+=("$cfg: \`$name\` (command: ${cmd:-?})")
+              fi
+            fi
+          done < <(jq -r '(.mcpServers // .servers // {}) | to_entries[]? | "\(.key)\t\(.value.command // "")"' "$cfg" 2>/dev/null || true)
+        done
+
+        if [ -z "$ALLOW_TOKENS" ]; then
+          {
+            echo "## MCP servers (inventory — no allowlist set)"
+            for f in "${FOUND[@]}"; do echo "- $f"; done
+            echo ""; echo "Set the \`allowlist\` input (approved names/commands) to enforce."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::mcp-allowlist: inventoried ${#FOUND[@]} MCP server(s); no allowlist set (set one to enforce)."
+          exit 0
+        fi
+
+        if [ "${#VIOLATIONS[@]}" -eq 0 ]; then
+          echo "::notice::✅ mcp-allowlist: all ${#FOUND[@]} MCP server(s) are allowlisted."
+          exit 0
+        fi
+        {
+          echo "## 🚨 Non-allowlisted MCP servers: ${#VIOLATIONS[@]}"
+          for v in "${VIOLATIONS[@]}"; do echo "- $v"; done
+          echo ""; echo "**Action:** remove the server or add it to the org MCP allowlist after review."
+        } >> "$GITHUB_STEP_SUMMARY"
+        for v in "${VIOLATIONS[@]}"; do echo "::warning::mcp-allowlist: non-allowlisted MCP server — $v"; done
+
+        if [ "$ENFORCE" = "fail" ]; then
+          echo "::error::mcp-allowlist: ${#VIOLATIONS[@]} non-allowlisted MCP server(s)."
+          exit 1
+        fi
+        echo "::warning::mcp-allowlist: ${#VIOLATIONS[@]} non-allowlisted MCP server(s) (advisory — set enforcement=fail to block)."
+        exit 0

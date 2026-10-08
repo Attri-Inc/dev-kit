@@ -1,0 +1,81 @@
+name: 'Trojan Source + homoglyph scan (all source)'
+description: |
+  Scans SOURCE CODE (not just agent rule files) for two hidden-character attacks:
+    - Trojan Source (CVE-2021-42574): BiDi / zero-width / invisible / format
+      Unicode that makes code read differently to humans vs the compiler.
+    - Homoglyph / mixed-script identifiers: a token mixing ASCII Latin with
+      confusable Cyrillic/Greek letters (e.g. a Cyrillic lookalike substituted
+      for a Latin letter inside an identifier) — defeats copy-paste and review.
+  Matches by Unicode CODEPOINT (PCRE2). Diff-scoped on PRs (changed files),
+  full-tree otherwise. Warn-first. Excludes tests/fixtures (intentional samples).
+author: 'Attri Inc'
+
+inputs:
+  enforcement:
+    description: 'warn (advisory, default) | fail (block on any finding).'
+    required: false
+    default: 'warn'
+  changed-only:
+    description: 'true = scan only PR-changed files (default); false = scan all tracked files.'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        BASE: ${{ github.base_ref }}
+        ENFORCE: ${{ inputs.enforcement }}
+        CHANGED_ONLY: ${{ inputs.changed-only }}
+      run: |
+        set -uo pipefail
+
+        if [ "$CHANGED_ONLY" = "true" ] && [ -n "${BASE:-}" ]; then
+          git fetch origin "$BASE" --depth=50 2>/dev/null || true
+          mapfile -t FILES < <(git diff --name-only "origin/${BASE}...HEAD" 2>/dev/null || true)
+        else
+          mapfile -t FILES < <(git ls-files 2>/dev/null || true)
+        fi
+
+        # Invisible / BiDi / format Unicode (Trojan Source). Codepoint-precise.
+        BIDI='(*UTF)[\x{00AD}\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{2064}\x{2066}-\x{2069}\x{FEFF}]'
+        # Mixed-script: ASCII Latin adjacent to Cyrillic/Greek (homoglyph token).
+        HOMO='(*UTF)([A-Za-z][\x{0370}-\x{03FF}\x{0400}-\x{04FF}]|[\x{0370}-\x{03FF}\x{0400}-\x{04FF}][A-Za-z])'
+
+        BIDI_HITS=(); HOMO_HITS=()
+        for f in "${FILES[@]}"; do
+          [ -z "$f" ] && continue
+          [ -f "$f" ] || continue
+          case "$f" in tests/fixtures/*) continue ;; esac      # intentional samples
+          grep -lIP "$BIDI" "$f" >/dev/null 2>&1 && BIDI_HITS+=("$f")
+          grep -lIP "$HOMO" "$f" >/dev/null 2>&1 && HOMO_HITS+=("$f")
+        done
+
+        TOTAL=$(( ${#BIDI_HITS[@]} + ${#HOMO_HITS[@]} ))
+        if [ "$TOTAL" -eq 0 ]; then
+          echo "::notice::✅ trojan-source-scan: no invisible-Unicode or homoglyph findings."
+          exit 0
+        fi
+        {
+          echo "## 🚨 Trojan Source / homoglyph findings"
+          if [ "${#BIDI_HITS[@]}" -gt 0 ]; then
+            echo ""; echo "### BiDi / invisible / format Unicode (CVE-2021-42574)"
+            for f in "${BIDI_HITS[@]}"; do echo "- \`$f\`"; done
+          fi
+          if [ "${#HOMO_HITS[@]}" -gt 0 ]; then
+            echo ""; echo "### Mixed-script (homoglyph) identifiers"
+            for f in "${HOMO_HITS[@]}"; do echo "- \`$f\`"; done
+          fi
+          echo ""; echo "**Action:** confirm these characters are intentional (rare in code); attackers use them to hide logic from reviewers."
+        } >> "$GITHUB_STEP_SUMMARY"
+        for f in "${BIDI_HITS[@]}"; do echo "::warning file=$f::Invisible/BiDi Unicode (Trojan Source) in $f"; done
+        for f in "${HOMO_HITS[@]}"; do echo "::warning file=$f::Mixed-script (homoglyph) characters in $f"; done
+
+        if [ "$ENFORCE" = "fail" ]; then
+          echo "::error::trojan-source-scan: $TOTAL file(s) with hidden-character findings."
+          exit 1
+        fi
+        echo "::warning::trojan-source-scan: $TOTAL file(s) with findings (advisory — set enforcement=fail to block)."
+        exit 0

@@ -1,0 +1,165 @@
+name: 'Agent rule-file scanner'
+description: |
+  Scans agent rule/instruction files for prompt-injection vectors:
+    - BiDi / zero-width / format Unicode (Trojan Source CVE-2021-42574 + AI variants)
+    - Hidden post-install commands or shell escape patterns
+    - "Ignore previous instructions" / role-confusion markers
+    - Hidden HTML/Markdown comments with imperative content
+  Targets: CLAUDE.md, AGENTS.md, .cursorrules, .clinerules, .windsurfrules,
+  .github/copilot-instructions.md, GEMINI.md, .roo/rules/*, .skills/*/SKILL.md,
+  .claude/settings.json, .mcp.json, mcp_servers.json, .cursor/mcp.json
+author: 'Attri Inc'
+
+inputs:
+  fail-on:
+    description: 'critical | high | medium — minimum severity to fail the build'
+    required: false
+    default: 'high'
+  changed-only:
+    description: 'true to scan only files changed in PR (faster); false to scan all'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        BASE: ${{ github.base_ref }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        CHANGED_ONLY: ${{ inputs.changed-only }}
+      run: |
+        set -euo pipefail
+
+        TARGET_PATTERNS=(
+          'CLAUDE.md' 'AGENTS.md' 'GEMINI.md' '.cursorrules' '.clinerules' '.windsurfrules'
+          '.github/copilot-instructions.md' '.claude/settings.json' '.mcp.json' 'mcp_servers.json'
+          '.cursor/mcp.json' '.roo/rules' '.skills' '.claude/agents' '.claude/skills'
+        )
+
+        # Build list of files to scan
+        if [ "$CHANGED_ONLY" = "true" ] && [ -n "${BASE:-}" ]; then
+          git fetch origin "$BASE" --depth=50 2>/dev/null || true
+          ALL_FILES=$(git diff --name-only "origin/${BASE}...HEAD" 2>/dev/null || true)
+        else
+          ALL_FILES=$(find . -type f -not -path './.git/*' -not -path './node_modules/*' 2>/dev/null)
+        fi
+
+        FILES=()
+        while IFS= read -r f; do
+          [ -z "$f" ] && continue
+          [ -f "$f" ] || continue
+          for pat in "${TARGET_PATTERNS[@]}"; do
+            if [[ "$f" == *"$pat"* ]]; then
+              FILES+=( "$f" )
+              break
+            fi
+          done
+        done <<< "$ALL_FILES"
+
+        if [ ${#FILES[@]} -eq 0 ]; then
+          echo "::notice::No agent rule files in scope."
+          exit 0
+        fi
+
+        VIOLATIONS=0
+        REPORT=""
+        CRIT=0; HIGH=0; MED=0
+
+        flag() {
+          local sev="$1" file="$2" rule="$3" detail="$4"
+          REPORT+="| $sev | \`$file\` | $rule | $detail |"$'\n'
+          VIOLATIONS=$((VIOLATIONS + 1))
+          case "$sev" in
+            CRITICAL) CRIT=$((CRIT+1)) ;;
+            HIGH)     HIGH=$((HIGH+1)) ;;
+            MEDIUM)   MED=$((MED+1)) ;;
+          esac
+        }
+
+        for f in "${FILES[@]}"; do
+          # 1) BiDi + zero-width Unicode — CVE-2021-42574 (Trojan Source) class.
+          # Match by Unicode CODEPOINT, not raw bytes. The previous byte-class
+          # pattern (a) never matched the directional-isolate family U+2066-U+2069
+          # — the core Trojan Source attack, encoded `e2 81 xx` — and (b) matched
+          # any 0xEF/0xBB/0xBF byte, false-positiving on huge swaths of valid
+          # UTF-8. `(*UTF)` makes PCRE treat pattern and subject as UTF-8 so the
+          # \x{...} ranges match characters regardless of locale. (audit C4)
+          #   U+00AD SHY · U+200B-200F zero-width/marks · U+202A-202E embed/override
+          #   U+2060-2064 word-joiner/invisible · U+2066-2069 isolates · U+FEFF BOM/ZWNBSP
+          if grep -lP '(*UTF)[\x{00AD}\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{2064}\x{2066}-\x{2069}\x{FEFF}]' "$f" >/dev/null 2>&1; then
+            flag CRITICAL "$f" "hidden-unicode" "Contains BiDi / zero-width / format Unicode characters (Trojan Source class)"
+          fi
+
+          # 2) Prompt-injection markers
+          if grep -qiE '(ignore (all )?(previous|prior|above) instructions|disregard (the )?system prompt|you are now|new instructions:|override.*role|jailbreak)' "$f"; then
+            flag HIGH "$f" "prompt-injection-marker" "Contains role-override / instruction-override phrasing"
+          fi
+
+          # 3) Hidden HTML/Markdown comments with imperative content
+          if grep -qiE '<!--.*(execute|run|install|curl|wget|chmod|sudo|exfil|delete|rm |mv |cp ).*-->' "$f"; then
+            flag HIGH "$f" "hidden-comment-imperative" "HTML/Markdown comment contains imperative shell-like content"
+          fi
+
+          # 4) Inline post-install / shell-escape commands
+          if grep -qiE '(curl[^|]*\|\s*sh|wget[^|]*\|\s*sh|bash[^|]*<\(curl|sudo\s+(rm|mv|chmod|chown))' "$f"; then
+            flag CRITICAL "$f" "shell-escape" "Inline pipe-to-shell or sudo command"
+          fi
+
+          # 5) Suspicious MCP server URLs (non-allowlisted hosts when MCP config present)
+          if [[ "$f" == *".mcp.json" ]] || [[ "$f" == *"mcp_servers.json" ]] || [[ "$f" == *".cursor/mcp.json" ]]; then
+            if grep -oE '"command":\s*"[^"]+"' "$f" | grep -qiE '(curl|wget|bash -c|/tmp/|http://)'; then
+              flag CRITICAL "$f" "mcp-suspicious-command" "MCP server uses curl/wget/bash-c or insecure URL"
+            fi
+            if grep -oE '"url":\s*"[^"]+"' "$f" | grep -qE '"http://'; then
+              flag HIGH "$f" "mcp-insecure-transport" "MCP server URL uses http:// (not https://)"
+            fi
+          fi
+
+          # 6) Anthropic-mandated denylist for `.claude/settings.json`
+          if [[ "$f" == *".claude/settings.json" ]]; then
+            if grep -qE '"defaultMode":\s*"bypassPermissions"' "$f"; then
+              flag CRITICAL "$f" "claude-bypass-mode" 'defaultMode: "bypassPermissions" disables ALL prompts (Anthropic mandates against this)'
+            fi
+            if grep -qE '"matcher":\s*"\.\*"' "$f" | head -1; then
+              flag HIGH "$f" "claude-empty-matcher" 'Matcher ".*" auto-approves every permission prompt'
+            fi
+          fi
+
+          # 7) Skill frontmatter hijacking (post-install in description)
+          if [[ "$f" == *"SKILL.md"* ]] || [[ "$f" == *"agents"* ]]; then
+            if awk '/^---$/{n++} n==1' "$f" | grep -qiE '(post-install|postinstall|setup-script|exec:|run:)'; then
+              flag HIGH "$f" "skill-frontmatter-hijack" "Skill/agent YAML frontmatter contains exec/install hooks"
+            fi
+          fi
+        done
+
+        if [ "$VIOLATIONS" -gt 0 ]; then
+          {
+            echo "## ❌ Agent rule-file scanner: $VIOLATIONS finding(s)"
+            echo ""
+            echo "| Severity | File | Rule | Detail |"
+            echo "|---|---|---|---|"
+            printf '%s' "$REPORT"
+            echo ""
+            echo "**Why this matters:** prompt injection in agent rule files (CLAUDE.md, .cursorrules, MCP configs) is the #1 attack class against AI coding tools in 2025-26 (CVE-2025-53773 Copilot RCE, CamoLeak CVSS 9.6, EchoLeak). Hidden Unicode is the same class as Trojan Source CVE-2021-42574."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Severity gate
+          should_fail=false
+          case "$FAIL_ON" in
+            critical)            [ "$CRIT" -gt 0 ] && should_fail=true ;;
+            high)                [ "$CRIT" -gt 0 ] || [ "$HIGH" -gt 0 ] && should_fail=true ;;
+            medium)              [ "$CRIT" -gt 0 ] || [ "$HIGH" -gt 0 ] || [ "$MED" -gt 0 ] && should_fail=true ;;
+          esac
+
+          if [ "$should_fail" = true ]; then
+            echo "::error::agent-rule-scanner: $CRIT critical, $HIGH high, $MED medium (threshold: $FAIL_ON)"
+            exit 1
+          else
+            echo "::warning::agent-rule-scanner: $VIOLATIONS finding(s) below threshold $FAIL_ON"
+          fi
+        else
+          echo "::notice::✅ No prompt-injection / hidden-Unicode / suspicious MCP findings."
+        fi

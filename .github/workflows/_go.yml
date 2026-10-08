@@ -1,0 +1,124 @@
+name: _go
+
+# Single-job orchestration — saves ~2 runner-minutes per Go PR vs splitting into
+# 3 parallel jobs that each pay setup-go startup time (~30s each).
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner for jobs (default ubuntu-latest; set self-hosted to use your own runners).'
+        type: string
+        default: 'ubuntu-latest'
+      tier:
+        type: string
+        required: true
+      run-medium:
+        type: string
+        default: 'false'
+      fail-on:
+        type: string
+        default: 'high'
+      go-version:
+        type: string
+        default: 'stable'
+      diff-coverage-min:
+        description: 'Minimum % of CHANGED lines that must be covered by tests (patch coverage).'
+        type: string
+        default: '80'
+      diff-coverage-enforcement:
+        description: 'warn (advisory, default) | fail (block PRs below diff-coverage-min).'
+        type: string
+        default: 'warn'
+      test-os:
+        description: 'JSON array of runner OSes for the test matrix. Default ["ubuntu-latest"].'
+        type: string
+        default: '["ubuntu-latest"]'
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  go:
+    name: Go (lint + vuln + build + test)
+    # Cross-OS opt-in (default ubuntu = unchanged). On macos/windows only
+    # build+test run (the portability value); lint/vuln/coverage run once on
+    # Linux. fail-fast off. (cross-OS P1)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.test-os) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ inputs.go-version }}
+
+      - name: Cache golangci-lint
+        if: runner.os == 'Linux'
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/golangci-lint
+          key: golangci-${{ runner.os }}-${{ hashFiles('**/.golangci.yml', '**/.golangci.yaml') }}
+
+      - name: golangci-lint
+        if: runner.os == 'Linux'
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+
+      - name: govulncheck
+        if: inputs.run-medium == 'true' && runner.os == 'Linux'
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: ${{ inputs.go-version }}
+          go-package: ./...
+
+      # Verify downloaded modules match go.sum checksums (tamper detection /
+      # lockfile integrity). Fails on a checksum mismatch. (SSoT: lockfile integrity P0)
+      - name: Verify module integrity
+        run: go mod verify
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        shell: bash
+        run: |
+          # -race needs a C toolchain (finicky on Windows); run it + coverage on
+          # Linux, plain `go test` elsewhere (still catches portability bugs).
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            go test -race -coverprofile=coverage.out ./...
+          else
+            go test ./...
+          fi
+
+      - uses: codecov/codecov-action@v7
+        if: hashFiles('coverage.out') != '' && runner.os == 'Linux'
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      # setup-python gives a clean (non-PEP-668-locked) Python so the gate can
+      # pip-install diff-cover; the Go job otherwise has no Python toolchain.
+      - uses: actions/setup-python@v6
+        if: hashFiles('coverage.out') != '' && github.event_name == 'pull_request'
+        with:
+          python-version: '3.12'
+      # Patch-coverage gate (Go profile → Cobertura, module prefix stripped). Warn-first.
+      - name: Diff coverage gate
+        if: hashFiles('coverage.out') != ''
+        uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
+        with:
+          report: coverage.out
+          format: golang
+          base-ref: ${{ github.base_ref }}
+          min-coverage: ${{ inputs.diff-coverage-min }}
+          enforcement: ${{ inputs.diff-coverage-enforcement }}

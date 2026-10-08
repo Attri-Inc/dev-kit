@@ -1,0 +1,88 @@
+name: 'Verify build provenance attestation'
+description: |
+  Verifies a Sigstore/SLSA build-provenance attestation for an OCI image or a
+  file artifact using `gh attestation verify`. Confirms the subject was produced
+  by the expected GitHub owner/repo — closing the "sign but never verify" gap
+  (an unverified signature provides no protection).
+
+  enforcement=fail (default) blocks on a verification failure; enforcement=warn
+  annotates only. A missing file subject is skipped (warn), not failed.
+author: 'Attri Inc'
+
+inputs:
+  subject:
+    description: 'What to verify: a file path (subject-type=file) or an image ref like registry/img:tag (subject-type=oci).'
+    required: true
+  subject-type:
+    description: 'file | oci'
+    required: false
+    default: 'file'
+  owner:
+    description: 'Expected attestation owner (org). Defaults to the current repository owner.'
+    required: false
+    default: ''
+  repo:
+    description: 'Optional owner/name to scope verification to a specific repo.'
+    required: false
+    default: ''
+  enforcement:
+    description: 'fail (default — block on verification failure) | warn (annotate only).'
+    required: false
+    default: 'fail'
+  github-token:
+    description: 'Token used by `gh attestation verify` (needs read access to attestations).'
+    required: true
+
+outputs:
+  verified:
+    description: "'true' if verified, 'false' if verification failed, '' if skipped."
+    value: ${{ steps.verify.outputs.verified }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: verify
+      shell: bash
+      env:
+        SUBJECT: ${{ inputs.subject }}
+        STYPE: ${{ inputs.subject-type }}
+        OWNER_IN: ${{ inputs.owner }}
+        REPO_IN: ${{ inputs.repo }}
+        ENFORCE: ${{ inputs.enforcement }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -uo pipefail
+        echo "verified=" >> "$GITHUB_OUTPUT"
+
+        OWNER="${OWNER_IN:-$GITHUB_REPOSITORY_OWNER}"
+        ARGS=( --owner "$OWNER" )
+        [ -n "${REPO_IN:-}" ] && ARGS+=( --repo "$REPO_IN" )
+
+        if [ "$STYPE" = "oci" ]; then
+          TARGET="oci://${SUBJECT#oci://}"
+        else
+          if [ ! -e "$SUBJECT" ]; then
+            echo "::warning::verify-attestation: subject '$SUBJECT' not found — skipping."
+            exit 0
+          fi
+          TARGET="$SUBJECT"
+        fi
+
+        set +e
+        gh attestation verify "$TARGET" "${ARGS[@]}"
+        rc=$?
+        set -e
+
+        if [ "$rc" -eq 0 ]; then
+          echo "verified=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::verify-attestation: provenance verified for ${TARGET} (owner=${OWNER})."
+          exit 0
+        fi
+
+        echo "verified=false" >> "$GITHUB_OUTPUT"
+        if [ "$ENFORCE" = "warn" ]; then
+          echo "::warning::verify-attestation: could not verify provenance for ${TARGET} (advisory — not blocking)."
+          exit 0
+        fi
+        echo "::error::verify-attestation: provenance verification FAILED for ${TARGET}."
+        exit 1

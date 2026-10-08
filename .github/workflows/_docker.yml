@@ -1,0 +1,174 @@
+name: _docker
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner for jobs (default ubuntu-latest; set self-hosted to use your own runners).'
+        type: string
+        default: 'ubuntu-latest'
+      tier:
+        type: string
+        required: true
+      fail-on:
+        type: string
+        default: 'high'
+      dockerfile:
+        description: 'Comma-separated Dockerfile paths, or "auto" to discover all'
+        type: string
+        default: 'auto'
+      trivy-skip-db-update:
+        description: |
+          When true, Trivy reuses the cached vulnerability DB instead of pulling
+          the latest. Makes the image scan reproducible (the same commit yields
+          the same verdict) at the cost of not seeing brand-new advisories until
+          the cache rotates. Default false = always pull the latest DB.
+        type: string
+        default: 'false'
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  discover:
+    name: Discover Dockerfiles
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: find
+        shell: bash
+        run: |
+          if [ '${{ inputs.dockerfile }}' = 'auto' ]; then
+            FILES=$(find . -name 'Dockerfile*' -not -path '*/node_modules/*' -not -path '*/.git/*' | sort)
+          else
+            FILES=$(echo '${{ inputs.dockerfile }}' | tr ',' '\n')
+          fi
+          if [ -z "$FILES" ]; then
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          MATRIX=$(echo "$FILES" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map({dockerfile: ., context: (. | split("/") | .[:-1] | join("/") | if . == "" then "." else . end)}) | {include: .}')
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  hadolint:
+    name: hadolint ${{ matrix.dockerfile }}
+    needs: discover
+    if: fromJson(needs.discover.outputs.matrix).include[0] != null
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      # hadolint-action runs hadolint in a container; hadolint itself is a
+      # single static binary and only reads the Dockerfile as text, so no
+      # Docker daemon is required to lint it.
+      - name: Ensure hadolint
+        shell: bash
+        env:
+          WANT: '2.15.1'
+        run: |
+          set -uo pipefail
+          # Preinstalled on self-hosted runner images; download only when the
+          # binary is absent or the version does not match the pin.
+          have="$(hadolint --version 2>/dev/null | awk '{print $NF}' || true)"
+          if [ "$have" = "$WANT" ]; then
+            echo "::notice::hadolint ${WANT} preinstalled — skipping download."
+          else
+            echo "Installing hadolint ${WANT} (found: ${have:-none})"
+            set -e
+            curl -fsSL -o /tmp/hadolint \
+              "https://github.com/hadolint/hadolint/releases/download/v${WANT}/hadolint-linux-x86_64"
+            sudo install -m 0755 /tmp/hadolint /usr/local/bin/hadolint
+            rm -f /tmp/hadolint
+            set +e
+          fi
+          hadolint --version
+      - name: hadolint
+        shell: bash
+        env:
+          DOCKERFILE: ${{ matrix.dockerfile }}
+        run: |
+          set -uo pipefail
+          # no-fail parity: report findings via SARIF, never fail this step.
+          hadolint --format sarif "${DOCKERFILE}" > hadolint.sarif || true
+      - uses: github/codeql-action/upload-sarif@v4
+        # Private repos without GHAS can't upload SARIF — don't block the gate.
+        continue-on-error: true
+        if: always() && hashFiles('hadolint.sarif') != '' && !github.event.repository.private
+        with:
+          sarif_file: hadolint.sarif
+          category: hadolint-${{ matrix.dockerfile }}
+
+  build-and-scan:
+    name: Build + Trivy + Dockle ${{ matrix.dockerfile }}
+    needs: discover
+    if: fromJson(needs.discover.outputs.matrix).include[0] != null
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - name: Cache Trivy DB
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}
+      - name: Sanitize image-ref tag
+        id: tag
+        shell: bash
+        run: |
+          SAFE=$(echo '${{ matrix.dockerfile }}' | tr 'A-Z/' 'a-z-' | tr -cd '[:alnum:]._-' | sed 's/^[._-]*//')
+          echo "tag=attri-dev-kit/scan-${SAFE:-image}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+      - name: Build (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          tags: ${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # v7 enables provenance + sbom by default → produces an OCI image-index
+          # that breaks `docker load`. Disable both for scan builds.
+          provenance: false
+          sbom: false
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.tag.outputs.tag }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: HIGH,CRITICAL
+          cache-dir: ~/.cache/trivy
+          skip-db-update: ${{ inputs.trivy-skip-db-update }}
+          exit-code: ${{ inputs.fail-on == 'critical' && '1' || '0' }}
+      - uses: github/codeql-action/upload-sarif@v4
+        # Private repos without GHAS can't upload SARIF — don't block the gate.
+        continue-on-error: true
+        if: always() && hashFiles('trivy-image.sarif') != '' && !github.event.repository.private
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-${{ matrix.dockerfile }}
+      - name: Dockle
+        uses: erzz/dockle-action@v1
+        with:
+          image: ${{ steps.tag.outputs.tag }}
+          report-format: sarif
+          report-name: dockle.sarif
+          failure-threshold: high
+          exit-code: 0
+      - uses: github/codeql-action/upload-sarif@v4
+        # Private repos without GHAS can't upload SARIF — don't block the gate.
+        continue-on-error: true
+        if: always() && hashFiles('dockle.sarif') != '' && !github.event.repository.private
+        with:
+          sarif_file: dockle.sarif
+          category: dockle-${{ matrix.dockerfile }}

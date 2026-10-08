@@ -1,0 +1,88 @@
+# attri-dev-kit local hooks — mirrors the CI gate.
+# Install in your repo:
+#   1. brew install lefthook (or npm i -D @evilmartians/lefthook)
+#   2. cp <kit>/policies/lefthook.yml lefthook.yml
+#   3. lefthook install
+#
+# Hooks fail fast locally so CI doesn't have to.
+
+pre-commit:
+  parallel: true
+  commands:
+    detect-secrets:
+      run: |
+        if command -v detect-secrets >/dev/null; then
+          detect-secrets-hook --baseline .secrets.baseline {staged_files}
+        else
+          echo "::warning::detect-secrets not installed — pip install detect-secrets"
+        fi
+      stage_fixed: false
+
+    ruff-lint:
+      glob: "*.py"
+      run: |
+        if command -v ruff >/dev/null; then
+          ruff check --fix {staged_files} && ruff format {staged_files}
+        fi
+      stage_fixed: true
+
+    biome:
+      glob: "*.{js,jsx,ts,tsx,json,jsonc,css}"
+      run: |
+        if [ -f biome.json ] && command -v biome >/dev/null; then
+          biome check --write {staged_files}
+        fi
+      stage_fixed: true
+
+    actionlint:
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: |
+        if command -v actionlint >/dev/null; then
+          actionlint {staged_files}
+        fi
+
+    shellcheck:
+      glob: "*.{sh,bash}"
+      run: |
+        if command -v shellcheck >/dev/null; then
+          shellcheck {staged_files}
+        fi
+
+    hadolint:
+      glob: "Dockerfile*"
+      run: |
+        if command -v hadolint >/dev/null; then
+          hadolint {staged_files}
+        fi
+
+    gitleaks:
+      run: |
+        if command -v gitleaks >/dev/null; then
+          gitleaks protect --staged --no-banner
+        fi
+
+commit-msg:
+  commands:
+    commitlint:
+      run: |
+        if command -v commitlint >/dev/null; then
+          commitlint --edit {1}
+        fi
+
+pre-push:
+  commands:
+    identity-check:
+      run: |
+        # Space-separated allowed email domains, e.g. "example.com example.org".
+        # Empty skips the check — mirror the gate's allowed-author-domains.
+        ALLOWED_DOMAINS=""
+        [ -z "$ALLOWED_DOMAINS" ] && exit 0
+        AUTHOR_EMAIL=$(git config user.email)
+        for d in $ALLOWED_DOMAINS; do
+          case "$AUTHOR_EMAIL" in
+            *@"$d") echo "✅ identity OK ($AUTHOR_EMAIL)"; exit 0 ;;
+          esac
+        done
+        echo "::error::Your git user.email ($AUTHOR_EMAIL) is not in: $ALLOWED_DOMAINS"
+        echo "Fix: git config --global user.email 'you@<an allowed domain>'"
+        exit 1

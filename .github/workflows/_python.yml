@@ -1,0 +1,503 @@
+name: _python
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner for jobs (default ubuntu-latest; set self-hosted to use your own runners).'
+        type: string
+        default: 'ubuntu-latest'
+      tier:
+        type: string
+        required: true
+      run-medium:
+        type: string
+        default: 'false'
+      fail-on:
+        type: string
+        default: 'high'
+      vuln-block-unfixable:
+        description: |
+          When false (default), dependency vulns with no fix version available
+          are reported as warnings instead of blocking — you cannot remediate
+          a vuln that has no patched release. Set true to block regardless.
+        type: string
+        default: 'false'
+      vuln-delta-only:
+        description: |
+          When true (default), only vulns introduced by this PR (vs the base
+          branch) block; vulns already present on the base are reported as
+          warnings. Keeps unrelated PRs green when a new upstream advisory
+          lands on an inherited dependency, and makes the verdict deterministic
+          with respect to the change rather than the advisory-feed clock.
+        type: string
+        default: 'true'
+      python-version:
+        type: string
+        default: '3.11'
+      skip-mypy:
+        description: |
+          Bypass the mypy type-check job for this repo. Mirrors the
+          pr-size-guard override: an explicit, owner-approved escape hatch
+          for repos that can't satisfy the kit's mypy defaults yet. Prefer
+          fixing types over setting this. Default 'false'.
+        type: string
+        default: 'false'
+      test-command:
+        description: 'Override the test command. Default: pytest with coverage'
+        type: string
+        default: ''
+      test-paths:
+        description: 'Override pytest paths. Default: auto-detect tests/ test/ test_*.py'
+        type: string
+        default: ''
+      diff-coverage-min:
+        description: 'Minimum % of CHANGED lines that must be covered by tests (patch coverage).'
+        type: string
+        default: '80'
+      diff-coverage-enforcement:
+        description: 'warn (advisory, default) | fail (block PRs below diff-coverage-min).'
+        type: string
+        default: 'warn'
+      test-os:
+        description: |
+          JSON array of runner OSes for the test matrix. Default '["ubuntu-latest"]'
+          (single OS = no change). Set e.g. '["ubuntu-latest","macos-latest","windows-latest"]'
+          for libraries/CLIs/native code that must work cross-platform.
+        type: string
+        default: '["ubuntu-latest"]'
+      run-pre-commit:
+        description: |
+          auto (default): run `pre-commit run --all-files` when
+          `.pre-commit-config.yaml` is present, and skip the kit's
+          ruff/black/mypy/bandit jobs to avoid double-runs with
+          conflicting configs.
+          force: always run pre-commit (errors if no config file).
+          skip:  never run pre-commit even if a config exists.
+        type: string
+        default: 'auto'
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  detect-tooling:
+    name: Detect Python tooling
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      lockfile: ${{ steps.d.outputs.lockfile }}
+      package-manager: ${{ steps.d.outputs.pm }}
+      tests-found: ${{ steps.d.outputs.tests }}
+      pre-commit-found: ${{ steps.d.outputs.pre_commit }}
+      run-pre-commit: ${{ steps.d.outputs.run_pre_commit }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: d
+        shell: bash
+        env:
+          MODE: ${{ inputs.run-pre-commit }}
+        run: |
+          if   [ -f poetry.lock ];        then echo "pm=poetry; lockfile=poetry.lock"
+          elif [ -f Pipfile.lock ];       then echo "pm=pipenv; lockfile=Pipfile.lock"
+          elif [ -f uv.lock ];            then echo "pm=uv;     lockfile=uv.lock"
+          elif [ -f pdm.lock ];           then echo "pm=pdm;    lockfile=pdm.lock"
+          elif [ -f requirements.txt ];   then echo "pm=pip;    lockfile=requirements.txt"
+          # No lockfile, but a pyproject.toml fully declares the dependency set —
+          # enough for pip-audit to resolve and scan. Lets repos that don't commit
+          # uv.lock (or any lockfile) still pass the dependency-vuln gate.
+          elif [ -f pyproject.toml ];     then echo "pm=pip;    lockfile=pyproject.toml"
+          else                                 echo "pm=pip;    lockfile=none"
+          fi | tee /tmp/pm.txt
+          PM=$(awk -F'pm=' '{print $2}' /tmp/pm.txt | awk -F';' '{print $1}' | tr -d ' ')
+          LF=$(awk -F'lockfile=' '{print $2}' /tmp/pm.txt | tr -d ' ')
+          echo "pm=$PM" >> "$GITHUB_OUTPUT"
+          echo "lockfile=$LF" >> "$GITHUB_OUTPUT"
+          # Test discovery (handles non-standard layouts in lm-multi-agent, b-h-knowledge-bot-be)
+          if find . -maxdepth 6 \( -name 'test_*.py' -o -name '*_test.py' -o -name 'conftest.py' \) \
+              -not -path './.venv/*' -not -path './node_modules/*' | head -1 | grep -q .; then
+            echo "tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tests=false" >> "$GITHUB_OUTPUT"
+          fi
+          # Pre-commit detection
+          if [ -f .pre-commit-config.yaml ] || [ -f .pre-commit-config.yml ]; then
+            echo "pre_commit=true" >> "$GITHUB_OUTPUT"
+            HAVE_CFG=true
+          else
+            echo "pre_commit=false" >> "$GITHUB_OUTPUT"
+            HAVE_CFG=false
+          fi
+          # Resolve effective run-pre-commit decision
+          case "$MODE" in
+            force) RUN=true ;;
+            skip)  RUN=false ;;
+            auto|*) RUN=$HAVE_CFG ;;
+          esac
+          if [ "$MODE" = "force" ] && [ "$HAVE_CFG" = "false" ]; then
+            echo "::error::run-pre-commit=force but no .pre-commit-config.yaml found"
+            exit 1
+          fi
+          echo "run_pre_commit=$RUN" >> "$GITHUB_OUTPUT"
+          echo "::notice::pre-commit: config=$HAVE_CFG mode=$MODE → run=$RUN"
+
+  # ── Repo-owned hooks (canonical when present) ─────────────────────
+  # Runs `pre-commit run --all-files` against the repo's own
+  # .pre-commit-config.yaml. When this runs, the kit's separate
+  # ruff/black, mypy, and bandit jobs are skipped to avoid
+  # double-runs with conflicting configs (the repo's config wins).
+  pre-commit:
+    name: Pre-commit (repo hooks)
+    needs: detect-tooling
+    if: needs.detect-tooling.outputs.run-pre-commit == 'true'
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+      - name: Cache pre-commit envs
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-py${{ inputs.python-version }}-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-config.yml') }}
+          restore-keys: |
+            pre-commit-${{ runner.os }}-py${{ inputs.python-version }}-
+      - name: Install pre-commit
+        run: |
+          pip install --upgrade pip
+          pip install pre-commit
+      - name: Run pre-commit (--all-files)
+        run: pre-commit run --all-files --show-diff-on-failure --color always
+
+  lint:
+    name: Lint + format (ruff)
+    # Skip when pre-commit owns formatting/linting via the repo's own
+    # config. Avoids running ruff with kit defaults that conflict with
+    # the repo's pinned formatter/linter versions.
+    if: needs.detect-tooling.outputs.run-pre-commit != 'true'
+    needs: detect-tooling
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+      - uses: astral-sh/ruff-action@v4.0.0
+        with:
+          args: 'check --output-format=github'
+      - name: Detect formatter
+        id: fmt
+        run: |
+          USE_RUFF_FORMAT=true
+          if [ -f pyproject.toml ] && grep -qE '^\[tool\.black\]' pyproject.toml; then
+            USE_RUFF_FORMAT=false
+            echo "::notice::pyproject.toml [tool.black] detected — skipping ruff format check (Black is the canonical formatter for this repo)."
+          elif [ -f .pre-commit-config.yaml ] && grep -qE '\bblack\b' .pre-commit-config.yaml; then
+            USE_RUFF_FORMAT=false
+            echo "::notice::Black hook detected in .pre-commit-config.yaml — skipping ruff format check."
+          fi
+          echo "use=$USE_RUFF_FORMAT" >> "$GITHUB_OUTPUT"
+      - name: Ruff format check
+        if: steps.fmt.outputs.use == 'true'
+        run: |
+          pip install --quiet ruff
+          ruff format --check .
+      - name: Black format check
+        if: steps.fmt.outputs.use != 'true'
+        run: |
+          BLACK_VER=""
+          if [ -f .pre-commit-config.yaml ]; then
+            BLACK_VER=$(awk '
+              /repo:.*psf\/black/ { in_blk=1; next }
+              in_blk && /repo:/ { in_blk=0 }
+              in_blk && /rev:/ { gsub(/[ \t"'\'']/,"",$2); print $2; exit }
+            ' .pre-commit-config.yaml)
+          fi
+          if [ -n "$BLACK_VER" ]; then
+            echo "::notice::Installing Black==$BLACK_VER (pinned in .pre-commit-config.yaml) to match repo formatter"
+            pip install --quiet "black==$BLACK_VER"
+          else
+            pip install --quiet black
+          fi
+          black --check .
+
+  type-check:
+    name: Type check (mypy)
+    # Skip when the repo's pre-commit runs mypy (most do), or when the
+    # caller explicitly bypasses mypy via the skip-mypy input.
+    if: needs.detect-tooling.outputs.run-pre-commit != 'true' && inputs.skip-mypy != 'true'
+    needs: detect-tooling
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+      # mypy incremental cache: re-typechecking unchanged files is 5-10x faster
+      # when .mypy_cache/ is restored. Key on the lockfile hashes — if deps
+      # change, types may shift, so cache invalidates automatically.
+      - name: Cache mypy incremental
+        uses: actions/cache@v5
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-py${{ inputs.python-version }}-${{ hashFiles('**/poetry.lock', '**/Pipfile.lock', '**/uv.lock', '**/pdm.lock', '**/requirements*.txt', '**/pyproject.toml') }}
+          restore-keys: |
+            mypy-${{ runner.os }}-py${{ inputs.python-version }}-
+      - name: Install project + mypy
+        run: |
+          pip install --upgrade pip mypy
+          case '${{ needs.detect-tooling.outputs.package-manager }}' in
+            poetry) pip install poetry && poetry install --no-interaction --no-ansi ;;
+            pipenv) pip install pipenv && pipenv install --dev --deploy --ignore-pipfile ;;
+            uv)     pip install uv && uv sync --frozen ;;
+            pdm)    pip install pdm && pdm sync --no-self ;;
+            pip)
+              [ -f requirements.txt ] && pip install -r requirements.txt
+              [ -f requirements-dev.txt ] && pip install -r requirements-dev.txt
+              [ -f pyproject.toml ] && pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true
+              ;;
+          esac
+      - name: Run mypy
+        run: mypy . --ignore-missing-imports --no-error-summary
+        continue-on-error: ${{ inputs.tier == 'dev' }}
+
+  security:
+    name: Security (bandit)
+    # Skip when the repo's pre-commit runs bandit (many repos
+    # do). Note: security still runs at qa/main tier even when
+    # pre-commit is present, to ensure SARIF is uploaded for tracking.
+    if: inputs.run-medium == 'true' && (needs.detect-tooling.outputs.run-pre-commit != 'true' || inputs.tier == 'main')
+    needs: detect-tooling
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+      - run: pip install --quiet 'bandit[sarif]'
+      - name: Run bandit
+        run: bandit -r . -f sarif -o bandit.sarif --severity-level medium --exit-zero
+      - uses: github/codeql-action/upload-sarif@v4
+        # Code Scanning API requires GitHub Advanced Security on private repos.
+        # Without it, the upload returns "Resource not accessible by integration"
+        # and fails the job. Bandit findings are still visible in step logs.
+        continue-on-error: true
+        if: always() && !github.event.repository.private
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+
+  deps-vulns:
+    name: Dependency vulns (pip-audit)
+    if: inputs.run-medium == 'true'
+    needs: detect-tooling
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+      - name: pip-audit (severity- and delta-aware)
+        shell: bash
+        env:
+          PM: ${{ needs.detect-tooling.outputs.package-manager }}
+          FAIL_ON: ${{ inputs.fail-on }}
+          DELTA_ONLY: ${{ inputs.vuln-delta-only }}
+          BLOCK_UNFIX: ${{ inputs.vuln-block-unfixable }}
+          CLASSIFIER: |
+            import json, os
+
+            fail_on = os.environ["FAIL_ON"]
+            delta_only = os.environ["DELTA_ONLY"] == "true"
+            block_unfix = os.environ["BLOCK_UNFIX"] == "true"
+
+            def load(path):
+                try:
+                    with open(path) as fh:
+                        data = json.load(fh)
+                except Exception:
+                    return []
+                deps = data.get("dependencies", []) if isinstance(data, dict) else data
+                rows = []
+                for dep in deps:
+                    for v in (dep.get("vulns") or []):
+                        rows.append({
+                            "name": dep.get("name"),
+                            "version": dep.get("version"),
+                            "id": v.get("id"),
+                            "fixable": bool(v.get("fix_versions")),
+                        })
+                return rows
+
+            head = load("head.json")
+            base_ids = {r["id"] for r in load("base.json")}
+
+            block, warn = [], []
+            for r in head:
+                introduced = r["id"] not in base_ids
+                should_block = (
+                    fail_on != "none"
+                    and (introduced or not delta_only)
+                    and (r["fixable"] or block_unfix)
+                )
+                r["tags"] = ", ".join([
+                    "introduced" if introduced else "inherited",
+                    "fixable" if r["fixable"] else "no-fix",
+                ])
+                (block if should_block else warn).append(r)
+
+            def table(title, rows):
+                if not rows:
+                    return ""
+                lines = [f"### {title}", "", "| Package | Version | Advisory | Notes |", "|---|---|---|---|"]
+                for r in rows:
+                    lines.append(f"| {r['name']} | {r['version']} | {r['id']} | {r['tags']} |")
+                return "\n".join(lines) + "\n\n"
+
+            summary = "## Dependency vulnerabilities\n\n"
+            summary += table("❌ Blocking", block)
+            summary += table("⚠️ Advisory (non-blocking)", warn)
+            if not head:
+                summary += "No known vulnerabilities found.\n"
+            sp = os.environ.get("GITHUB_STEP_SUMMARY")
+            if sp:
+                with open(sp, "a") as fh:
+                    fh.write(summary)
+
+            for r in warn:
+                print(f"::warning::{r['name']} {r['version']} {r['id']} ({r['tags']}) — not blocking.")
+            if block:
+                for r in block:
+                    print(f"::error::{r['name']} {r['version']} {r['id']} ({r['tags']}).")
+                raise SystemExit(1)
+            print("::notice::Dependency vuln gate passed (0 blocking findings).")
+        run: |
+          set -uo pipefail
+          pip install --quiet pip-audit
+          LOCK='${{ needs.detect-tooling.outputs.lockfile }}'
+          if [ "$LOCK" = "none" ]; then
+            if [ "${{ inputs.tier }}" = "dev" ]; then
+              echo "::warning::No lockfile found — skipping pip-audit (dev tier)."
+              exit 0
+            fi
+            echo "::error::No dependency manifest found (poetry.lock / Pipfile.lock / uv.lock / pdm.lock / requirements.txt / pyproject.toml). Required at qa/main."
+            exit 1
+          fi
+
+          # Audit a project directory to JSON. pip-audit exits non-zero when it
+          # finds vulns; we capture the report with `|| true` and decide ourselves.
+          audit_dir() {  # $1 = dir, $2 = output json
+            ( cd "$1" && case "$PM" in
+                poetry) poetry export -f requirements.txt --without-hashes -o /tmp/_req.txt 2>/dev/null && pip-audit -r /tmp/_req.txt -f json ;;
+                pipenv) pip-audit -r Pipfile.lock -f json ;;
+                uv|pdm) pip-audit . -f json ;;
+                pip)    if [ -f requirements.txt ]; then pip-audit -r requirements.txt -f json
+                        else pip-audit . -f json; fi ;;
+              esac ) > "$2" 2>/dev/null || true
+            [ -s "$2" ] || echo '{"dependencies":[]}' > "$2"
+          }
+
+          audit_dir "$PWD" head.json
+
+          # Delta baseline: audit the same project at the PR base so we can tell
+          # vulns this PR introduced from ones it merely inherited.
+          echo '{"dependencies":[]}' > base.json
+          if [ "$DELTA_ONLY" = "true" ] && [ "${{ github.event_name }}" = "pull_request" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+            if git fetch origin "$GITHUB_BASE_REF" --depth=1 >/dev/null 2>&1 \
+               && git worktree add --detach /tmp/base-tree FETCH_HEAD >/dev/null 2>&1; then
+              audit_dir /tmp/base-tree base.json
+              git worktree remove --force /tmp/base-tree >/dev/null 2>&1 || true
+            else
+              echo "::warning::Could not resolve base branch for delta vuln scan — treating all findings as introduced."
+            fi
+          fi
+
+          python3 -c "$CLASSIFIER"
+
+  test:
+    name: Test (pytest)
+    if: needs.detect-tooling.outputs.tests-found == 'true'
+    needs: detect-tooling
+    # Cross-OS opt-in: default matrix is just ubuntu (unchanged); consumers can
+    # add macos/windows for portability-sensitive code. fail-fast off so one OS
+    # failing still reports the others. (cross-OS P1)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.test-os) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      # fetch-depth: 0 so the diff-coverage gate can find the merge-base with the
+      # PR's base branch and compute coverage of only the changed lines.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+      - name: Install
+        shell: bash   # Windows runners default to PowerShell; these are bash scripts
+        run: |
+          pip install --upgrade pip
+          case '${{ needs.detect-tooling.outputs.package-manager }}' in
+            poetry) pip install poetry && poetry install --no-interaction --no-ansi ;;
+            pipenv) pip install pipenv && pipenv install --dev --deploy --ignore-pipfile ;;
+            uv)     pip install uv && uv sync --frozen ;;
+            pdm)    pip install pdm && pdm sync ;;
+            pip)
+              [ -f requirements.txt ] && pip install -r requirements.txt
+              [ -f requirements-dev.txt ] && pip install -r requirements-dev.txt
+              [ -f requirements-test.txt ] && pip install -r requirements-test.txt
+              [ -f pyproject.toml ] && pip install -e ".[dev,test]" 2>/dev/null || pip install -e . 2>/dev/null || true
+              ;;
+          esac
+          pip install pytest pytest-cov
+      - name: Run pytest
+        shell: bash   # works on the macos/windows matrix entries too
+        # Note: TEST_CMD is captured into a local var first. The previous form
+        # `if [ -n '${{ inputs.test-command }}' ]; then ${{ inputs.test-command }}; else ...`
+        # rendered to `if [ -n '' ]; then\n  \nelse` when test-command was empty,
+        # and bash rejected the empty then-body with "syntax error near `else`".
+        run: |
+          TEST_CMD='${{ inputs.test-command }}'
+          if [ -n "$TEST_CMD" ]; then
+            bash -c "$TEST_CMD"
+          else
+            PATHS='${{ inputs.test-paths }}'
+            if [ -z "$PATHS" ]; then
+              # auto-detect
+              for p in tests test src/tests apps; do
+                [ -d "$p" ] && PATHS="$PATHS $p"
+              done
+              [ -z "$PATHS" ] && PATHS="."
+            fi
+            # shellcheck disable=SC2086 # PATHS is a deliberate space-separated arg list
+            pytest --cov --cov-report=xml --cov-report=term -q $PATHS
+          fi
+      # Coverage upload + gate run ONCE (on Linux), not per matrix OS.
+      - uses: codecov/codecov-action@v7
+        if: hashFiles('coverage.xml') != '' && runner.os == 'Linux'
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      # Patch-coverage gate: of the lines this PR changed, how many are tested?
+      # Self-contained (diff-cover), warn-first by default. (SSoT catalog: Testing P0)
+      - name: Diff coverage gate
+        if: hashFiles('coverage.xml') != '' && runner.os == 'Linux'
+        uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
+        with:
+          report: coverage.xml
+          format: cobertura
+          base-ref: ${{ github.base_ref }}
+          min-coverage: ${{ inputs.diff-coverage-min }}
+          enforcement: ${{ inputs.diff-coverage-enforcement }}

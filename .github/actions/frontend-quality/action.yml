@@ -1,0 +1,87 @@
+name: 'Frontend quality (a11y + performance budgets)'
+description: |
+  Runs frontend quality gates that need a built/served app, consume-if-present:
+    - Lighthouse CI (lhci autorun) when a lighthouserc config exists — covers
+      performance, Core Web Vitals, AND accessibility (Lighthouse's a11y category
+      runs axe-core), with pass/fail budgets defined in the repo's config.
+    - size-limit / bundlewatch when configured — JS/CSS bundle-size budgets.
+  The repo's own config specifies HOW to build/serve and WHAT the budgets are; the
+  kit just ensures the gate runs. Assumes Node + deps are already set up by the
+  caller job. Warn-first. Emits a notice (with how to enable) when nothing is configured.
+author: 'Attri Inc'
+
+inputs:
+  enforcement:
+    description: 'warn (advisory, default) | fail (block when a configured budget fails).'
+    required: false
+    default: 'warn'
+  lhci-version:
+    description: '@lhci/cli version.'
+    required: false
+    default: '0.14.0'
+
+runs:
+  using: 'composite'
+  steps:
+    - id: fe
+      shell: bash
+      env:
+        ENFORCE: ${{ inputs.enforcement }}
+        LHCI_VERSION: ${{ inputs.lhci-version }}
+      run: |
+        set -uo pipefail
+        RAN=0; FAILED=0
+
+        has_lhci_cfg=false
+        for f in lighthouserc.json lighthouserc.js lighthouserc.yml lighthouserc.yaml \
+                 .lighthouserc.json .lighthouserc.js .lighthouserc.yml .lighthouserc.yaml; do
+          [ -f "$f" ] && { has_lhci_cfg=true; break; }
+        done
+
+        has_sizelimit=false
+        { [ -f .size-limit.json ] || [ -f .size-limit.js ] || [ -f .size-limit.cjs ]; } && has_sizelimit=true
+        if command -v jq >/dev/null 2>&1 && [ -f package.json ]; then
+          jq -e 'has("size-limit")' package.json >/dev/null 2>&1 && has_sizelimit=true
+        fi
+
+        has_bundlewatch=false
+        [ -f .bundlewatch.config.js ] && has_bundlewatch=true
+        if command -v jq >/dev/null 2>&1 && [ -f package.json ]; then
+          jq -e 'has("bundlewatch")' package.json >/dev/null 2>&1 && has_bundlewatch=true
+        fi
+
+        run_tool() { # label  command...
+          local label="$1"; shift
+          echo "::group::$label"
+          RAN=$((RAN+1))
+          if "$@"; then echo "::endgroup::"; echo "::notice::frontend-quality: $label passed.";
+          else echo "::endgroup::"; FAILED=$((FAILED+1)); echo "::warning::frontend-quality: $label budget failed."; fi
+        }
+
+        if [ "$has_lhci_cfg" = true ]; then
+          run_tool "Lighthouse CI (perf + a11y + CWV)" npx --yes "@lhci/cli@${LHCI_VERSION}" autorun
+        fi
+        if [ "$has_sizelimit" = true ]; then
+          run_tool "size-limit (bundle budget)" npx --yes size-limit
+        fi
+        if [ "$has_bundlewatch" = true ]; then
+          run_tool "bundlewatch (bundle budget)" npx --yes bundlewatch
+        fi
+
+        if [ "$RAN" -eq 0 ]; then
+          echo "::notice::frontend-quality: no Lighthouse/size-limit/bundlewatch config found — skipping. Add a lighthouserc (perf + a11y budgets) or size-limit config to activate."
+          exit 0
+        fi
+
+        {
+          echo "## Frontend quality"
+          echo "- tools run: $RAN, budget failures: $FAILED"
+          echo "Lighthouse covers performance, Core Web Vitals, and accessibility (axe)."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$FAILED" -gt 0 ] && [ "$ENFORCE" = "fail" ]; then
+          echo "::error::frontend-quality: $FAILED budget(s) failed."
+          exit 1
+        fi
+        [ "$FAILED" -gt 0 ] && echo "::warning::frontend-quality: $FAILED budget(s) failed (advisory — set enforcement=fail to block)."
+        exit 0

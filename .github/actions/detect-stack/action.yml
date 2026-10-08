@@ -1,0 +1,111 @@
+name: 'Detect language stack'
+description: 'Detects language stack via file presence and emits per-language outputs.'
+author: 'Attri Inc'
+
+inputs:
+  languages:
+    description: 'Comma-separated language list, or "auto" to detect'
+    required: false
+    default: 'auto'
+
+outputs:
+  languages:
+    description: 'Resolved comma-separated language list'
+    value: ${{ steps.detect.outputs.languages }}
+  has-python:
+    description: 'true if Python detected'
+    value: ${{ steps.detect.outputs.has-python }}
+  has-typescript:
+    description: 'true if TypeScript or JavaScript detected'
+    value: ${{ steps.detect.outputs.has-typescript }}
+  has-java:
+    description: 'true if Java detected'
+    value: ${{ steps.detect.outputs.has-java }}
+  has-go:
+    description: 'true if Go detected'
+    value: ${{ steps.detect.outputs.has-go }}
+  has-terraform:
+    description: 'true if Terraform detected'
+    value: ${{ steps.detect.outputs.has-terraform }}
+  has-docker:
+    description: 'true if a Dockerfile is present'
+    value: ${{ steps.detect.outputs.has-docker }}
+  has-shell:
+    description: 'true if shell scripts detected'
+    value: ${{ steps.detect.outputs.has-shell }}
+  has-csharp:
+    description: 'true if C# detected'
+    value: ${{ steps.detect.outputs.has-csharp }}
+  node-version:
+    description: 'Node version the repo declares (.nvmrc / .node-version / package.json engines.node), or empty if undeclared'
+    value: ${{ steps.detect.outputs.node-version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: detect
+      shell: bash
+      run: |
+        set -euo pipefail
+        INPUT='${{ inputs.languages }}'
+        declare -A H
+
+        detect_python()    { [ -f pyproject.toml ] || [ -f setup.py ] || [ -f requirements.txt ] || ls *.py 2>/dev/null | head -1 > /dev/null || find . -maxdepth 4 -name "*.py" -not -path "./.git/*" -not -path "./node_modules/*" | head -1 | grep -q . ; }
+        detect_typescript(){ [ -f package.json ] || [ -f tsconfig.json ] || find . -maxdepth 4 -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" 2>/dev/null | grep -v node_modules | head -1 | grep -q . ; }
+        detect_java()      { [ -f pom.xml ] || [ -f build.gradle ] || [ -f build.gradle.kts ] || find . -maxdepth 4 -name "*.java" -not -path "./.git/*" | head -1 | grep -q . ; }
+        detect_go()        { [ -f go.mod ] ; }
+        detect_terraform() { find . -maxdepth 4 -name "*.tf" -not -path "./.git/*" -not -path "./.terraform/*" | head -1 | grep -q . ; }
+        detect_docker()    { [ -f Dockerfile ] || find . -maxdepth 4 -name "Dockerfile*" -not -path "./.git/*" | head -1 | grep -q . ; }
+        detect_shell()     { find . -maxdepth 4 \( -name "*.sh" -o -name "*.bash" \) -not -path "./.git/*" | head -1 | grep -q . ; }
+        detect_csharp()    { find . -maxdepth 4 \( -name "*.csproj" -o -name "*.sln" \) -not -path "./.git/*" | head -1 | grep -q . ; }
+
+        check() {
+          local lang="$1" detector="$2"
+          if [ "$INPUT" = "auto" ]; then
+            $detector && H[$lang]=true || H[$lang]=false
+          else
+            if echo "$INPUT" | tr ',' '\n' | grep -qx "$lang"; then
+              H[$lang]=true
+            else
+              H[$lang]=false
+            fi
+          fi
+        }
+
+        check python     detect_python
+        check typescript detect_typescript
+        check java       detect_java
+        check go         detect_go
+        check terraform  detect_terraform
+        check docker     detect_docker
+        check shell      detect_shell
+        check csharp     detect_csharp
+
+        DETECTED=()
+        for k in python typescript java go terraform docker shell csharp; do
+          if [ "${H[$k]:-false}" = "true" ]; then DETECTED+=("$k"); fi
+          echo "has-$k=${H[$k]:-false}" >> "$GITHUB_OUTPUT"
+        done
+
+        IFS=','
+        echo "languages=${DETECTED[*]:-none}" >> "$GITHUB_OUTPUT"
+        echo "::notice::Detected languages: ${DETECTED[*]:-none}"
+        unset IFS
+
+        # Node version for TS/JS jobs: honor the repo's DECLARED toolchain
+        # (.nvmrc / .node-version / package.json engines.node) instead of a
+        # blind default, so e.g. an Astro 6 repo requiring Node 22 isn't built
+        # on Node 20 and failed. Empty when undeclared → caller keeps its default.
+        NODE_VERSION=""
+        if [ -f .nvmrc ]; then
+          NODE_VERSION=$(head -n1 .nvmrc | tr -d ' \t\r\n'); NODE_VERSION="${NODE_VERSION#v}"
+        elif [ -f .node-version ]; then
+          NODE_VERSION=$(head -n1 .node-version | tr -d ' \t\r\n'); NODE_VERSION="${NODE_VERSION#v}"
+        elif [ -f package.json ] && command -v jq >/dev/null 2>&1; then
+          ENG=$(jq -r '.engines.node // empty' package.json 2>/dev/null || true)
+          NODE_VERSION=$(printf '%s' "$ENG" | grep -oE '[0-9]+(\.[0-9]+)*' | head -n1 || true)
+        fi
+        echo "node-version=$NODE_VERSION" >> "$GITHUB_OUTPUT"
+        if [ -n "$NODE_VERSION" ]; then
+          echo "::notice::Detected Node version: $NODE_VERSION (from repo .nvmrc/.node-version/engines)"
+        fi

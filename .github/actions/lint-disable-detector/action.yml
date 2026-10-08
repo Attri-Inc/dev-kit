@@ -1,0 +1,111 @@
+name: 'Lint-disable detector'
+description: |
+  Hard-blocks PRs that introduce unjustified lint/type-check suppression
+  directives (# noqa, # type: ignore, // @ts-ignore, // eslint-disable, etc.).
+
+  A disable is allowed if either:
+    1. Inline justification: `# reason: <why>` follows the disable on the same line
+    2. PR carries the `lint-disable-approved` label
+
+  Escalates the message when the disable was added by an AI-authored commit
+  (matched by committer email or commit message signature).
+
+  Mirrors exception-swallow's composite shape exactly.
+author: 'Attri Inc'
+
+inputs:
+  fail-on:
+    description: 'critical | high | medium | low — minimum severity to fail'
+    required: false
+    default: 'high'
+  bypass-label:
+    description: 'PR label that overrides finding'
+    required: false
+    default: 'lint-disable-approved'
+  scan-tests:
+    description: 'true | false — include files under tests/, **/*_test.*'
+    required: false
+    default: 'false'
+
+outputs:
+  findings-count:
+    description: 'Total unjustified disables found'
+    value: ${{ steps.scan.outputs.findings_count }}
+  ai-authored-count:
+    description: 'Subset added by AI-authored commits'
+    value: ${{ steps.scan.outputs.ai_authored_count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        BASE: ${{ github.base_ref }}
+        SCAN_TESTS: ${{ inputs.scan-tests }}
+        BYPASS_LABEL: ${{ inputs.bypass-label }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+        EVENT_NAME: ${{ github.event_name }}
+      run: |
+        set -euo pipefail
+        if [ "$EVENT_NAME" != "pull_request" ]; then
+          echo "::notice::Not a PR — skipping lint-disable-detector"
+          echo "findings_count=0" >> "$GITHUB_OUTPUT"
+          echo "ai_authored_count=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Compute changed-file list from the PR diff
+        git fetch --no-tags --depth=50 origin "$BASE" 2>/dev/null || true
+        FILES_LIST=$(mktemp)
+        git diff --name-only --diff-filter=AM "origin/$BASE...HEAD" > "$FILES_LIST"
+        FILE_COUNT=$(wc -l < "$FILES_LIST")
+        echo "::notice::lint-disable-detector scanning $FILE_COUNT changed files"
+
+        # Run scan
+        SCRIPT_DIR="${{ github.action_path }}"
+        SCAN_OUT=$("$SCRIPT_DIR/scan.sh" --files-list "$FILES_LIST" --json)
+        echo "$SCAN_OUT" > /tmp/lint-disable-findings.json
+
+        # Check bypass label
+        if echo "$PR_LABELS_JSON" | jq -r '.[].name' | grep -qx "$BYPASS_LABEL"; then
+          BYPASSED=true
+          echo "::notice::Bypass label '$BYPASS_LABEL' present — finding will not block"
+        else
+          BYPASSED=false
+        fi
+
+        FINDINGS_COUNT=$(jq '.findings | length' /tmp/lint-disable-findings.json)
+        AI_COUNT=$(jq '.ai_authored_count' /tmp/lint-disable-findings.json)
+        echo "findings_count=$FINDINGS_COUNT" >> "$GITHUB_OUTPUT"
+        echo "ai_authored_count=$AI_COUNT" >> "$GITHUB_OUTPUT"
+
+        # Job summary
+        {
+          echo "## Lint-Disable Detector"
+          echo ""
+          if [ "$FINDINGS_COUNT" = "0" ]; then
+            echo "No unjustified disable directives in this PR."
+          else
+            echo "Found **$FINDINGS_COUNT** unjustified suppression directive(s)."
+            if [ "$AI_COUNT" -gt 0 ]; then
+              echo ""
+              echo "**$AI_COUNT** of these were introduced by AI-authored commits."
+            fi
+            echo ""
+            echo "| File | Line | Disable | Status |"
+            echo "|---|--:|---|---|"
+            jq -r '.findings[] | "| `\(.file)` | \(.line) | `\(.content | gsub("\\|"; "\\|"))` | " + (if '"$BYPASSED"' then "BYPASSED" else "BLOCKED" end) + " |"' /tmp/lint-disable-findings.json
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        # Exit logic
+        if [ "$FINDINGS_COUNT" -gt 0 ] && [ "$BYPASSED" != "true" ]; then
+          if [ "$AI_COUNT" -gt 0 ]; then
+            echo "::error::Found $FINDINGS_COUNT unjustified disable(s), $AI_COUNT introduced by AI commits. Add '# reason: <why>' or apply the '$BYPASS_LABEL' label."
+          else
+            echo "::error::Found $FINDINGS_COUNT unjustified disable(s). Add '# reason: <why>' or apply the '$BYPASS_LABEL' label."
+          fi
+          exit 1
+        fi

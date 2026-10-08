@@ -1,0 +1,97 @@
+name: 'Log hygiene (no secrets/PII in logs, no raw debug prints)'
+description: |
+  Scans a PR's ADDED lines for two logging anti-patterns that sit between
+  "security" and "quality" and are usually owned by neither:
+    - HIGH: a secret or PII keyword inside a logging/print call (logs are a top
+      leak vector — PII in logs is a GDPR/HIPAA breach even if never displayed).
+    - MEDIUM: a raw debug print left in production code (console.log / print() /
+      debugger / System.out / fmt.Print / Console.WriteLine), outside test files.
+  Heuristic + diff-scoped (changed lines only) to keep noise low. Warn-first.
+author: 'Attri Inc'
+
+inputs:
+  enforcement:
+    description: 'warn (advisory, default) | fail (block on a HIGH finding).'
+    required: false
+    default: 'warn'
+
+runs:
+  using: 'composite'
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        BASE: ${{ github.base_ref }}
+        ENFORCE: ${{ inputs.enforcement }}
+      run: |
+        set -uo pipefail
+        if [ -z "${BASE:-}" ]; then
+          echo "::notice::Not a PR — skipping log-hygiene."
+          exit 0
+        fi
+        git fetch origin "$BASE" --depth=50 2>/dev/null || true
+
+        # Added lines only, source files, excluding tests (and lockfiles/docs).
+        DIFF="$(git diff "origin/${BASE}...HEAD" --unified=0 -- \
+          '*.py' '*.js' '*.jsx' '*.ts' '*.tsx' '*.go' '*.java' '*.cs' '*.rb' '*.php' \
+          ':(exclude)tests/**' ':(exclude)test/**' ':(exclude)**/*_test.go' \
+          ':(exclude)**/*.test.*' ':(exclude)**/*.spec.*' ':(exclude)**/__tests__/**' \
+          2>/dev/null || echo '')"
+        ADDED="$(echo "$DIFF" | grep -E '^\+' | grep -vE '^\+\+\+' || true)"
+        if [ -z "$ADDED" ]; then
+          echo "::notice::No production source changes to scan."
+          exit 0
+        fi
+
+        # A logging or print call (cross-language).
+        LOGCALL='(console\.(log|info|warn|error|debug|trace)|logger?\.(info|debug|warn|warning|error|trace|exception|fatal)|logging\.(info|debug|warning|error|exception|critical)|\blog\.(info|debug|warn|error|trace)|print\(|println|printf|System\.out\.print|Console\.Write(Line)?|fmt\.(Print|Sprint)|error_log|var_dump)'
+        # Secret / PII keyword lists (bare; matched only when USED as a value below).
+        KW='password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|authorization|bearer|private[_-]?key|client[_-]?secret|credential|session[_-]?id|set[_-]?cookie'
+        PIIKW='ssn|social[_-]?security|credit[_-]?card|card[_-]?number|cvv|passport[_-]?(no|number)|tax[_-]?id|date[_-]?of[_-]?birth|dob'
+        # "Used as a value": keyword adjacent to a format/assign/concat/paren char,
+        # so "password reset email" (prose) is NOT flagged but log(password),
+        # f"{token}", "ssn="+ssn, apiKey=… ARE. (cuts the prose false-positives)
+        SEC_USED="([={(\$%+,:](${KW})|(${KW})[]=)}%+,:])"
+        PII_USED="([={(\$%+,:](${PIIKW})|(${PIIKW})[]=)}%+,:])"
+        # Raw debug-print (leftover) — narrow set rarely legit in prod.
+        DEBUGP='(console\.(log|debug)|debugger;|System\.out\.print|fmt\.Print(ln|f)?\(|Console\.WriteLine|var_dump\(|\bdd\(|pprint\()'
+
+        VIOLATIONS=0; HIGH=0; MED=0; REPORT=""
+        flag() { # sev detail
+          REPORT+="| $1 | $(echo "$2" | sed 's/^\+//; s/^[[:space:]]*//' | head -c 100) |"$'\n'
+          VIOLATIONS=$((VIOLATIONS+1))
+          [ "$1" = HIGH ] && HIGH=$((HIGH+1)); [ "$1" = MEDIUM ] && MED=$((MED+1)); true
+        }
+
+        # HIGH — secret/PII used as a value inside a logging/print call.
+        while IFS= read -r line; do [ -z "$line" ] && continue; flag HIGH "SECRET-IN-LOG: $line"; done \
+          < <(echo "$ADDED" | grep -iE "$LOGCALL" | grep -iE "$SEC_USED" || true)
+        while IFS= read -r line; do [ -z "$line" ] && continue; flag HIGH "PII-IN-LOG: $line"; done \
+          < <(echo "$ADDED" | grep -iE "$LOGCALL" | grep -iE "$PII_USED" || true)
+
+        # MEDIUM — raw debug print left in production code.
+        while IFS= read -r line; do [ -z "$line" ] && continue; flag MEDIUM "DEBUG-PRINT: $line"; done \
+          < <(echo "$ADDED" | grep -E "$DEBUGP" || true)
+
+        if [ "$VIOLATIONS" -eq 0 ]; then
+          echo "::notice::✅ log-hygiene: no secret/PII-in-log or stray debug prints added."
+          exit 0
+        fi
+
+        {
+          echo "## Log hygiene: $VIOLATIONS finding(s) ($HIGH high, $MED medium)"
+          echo ""
+          echo "| Severity | Snippet (first 100 chars) |"
+          echo "|---|---|"
+          printf '%s' "$REPORT"
+          echo ""
+          echo "**Why:** secrets/PII in logs are a top leak vector (a GDPR/HIPAA breach even if never shown). Raw debug prints leak data and bypass structured logging."
+          echo "**Action:** log identifiers not values; redact/mask secrets & PII; use the structured logger instead of print()."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$ENFORCE" = "fail" ] && [ "$HIGH" -gt 0 ]; then
+          echo "::error::log-hygiene: $HIGH high-severity finding(s) (secret/PII in logs)."
+          exit 1
+        fi
+        echo "::warning::log-hygiene: $VIOLATIONS finding(s) ($HIGH high, $MED medium) — advisory; set enforcement=fail to block on high."
+        exit 0

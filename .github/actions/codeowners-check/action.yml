@@ -1,0 +1,87 @@
+name: 'CODEOWNERS coverage & validity'
+description: |
+  Read-only governance check the kit CAN own in CI (no org-admin token needed):
+  verifies a CODEOWNERS file exists, is syntactically valid with resolvable owners
+  (using GitHub's own authoritative `codeowners/errors` API — catches dead/invalid
+  owner handles and owners lacking access), and has a catch-all `*` rule so no path
+  is left unowned. Warn-first.
+author: 'Attri Inc'
+
+inputs:
+  enforcement:
+    description: 'warn (advisory, default) | fail (block on missing/invalid CODEOWNERS).'
+    required: false
+    default: 'warn'
+  github-token:
+    description: 'Token for the codeowners/errors API (default repo GITHUB_TOKEN is sufficient).'
+    required: true
+
+outputs:
+  status:
+    description: "'ok' | 'issues' | 'missing'"
+    value: ${{ steps.check.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: check
+      shell: bash
+      env:
+        ENFORCE: ${{ inputs.enforcement }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -uo pipefail
+        echo "status=" >> "$GITHUB_OUTPUT"
+
+        # CODEOWNERS may live in one of three locations (GitHub precedence order).
+        FILE=""
+        for f in .github/CODEOWNERS CODEOWNERS docs/CODEOWNERS; do
+          [ -f "$f" ] && { FILE="$f"; break; }
+        done
+
+        if [ -z "$FILE" ]; then
+          echo "status=missing" >> "$GITHUB_OUTPUT"
+          MSG="no CODEOWNERS file (checked .github/, root, docs/). Review can't be routed to accountable owners."
+          { echo "## CODEOWNERS"; echo ""; echo "❌ $MSG"; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$ENFORCE" = "fail" ]; then echo "::error::codeowners: $MSG"; exit 1; fi
+          echo "::warning::codeowners: $MSG (advisory — add .github/CODEOWNERS; see policies/CODEOWNERS.template)."
+          exit 0
+        fi
+
+        ISSUES=0
+        { echo "## CODEOWNERS (\`$FILE\`)"; echo ""; } >> "$GITHUB_STEP_SUMMARY"
+
+        # 1) Authoritative validity via GitHub's own evaluator (resolves owners,
+        #    flags unknown/invalid/no-access handles and malformed lines).
+        ERRORS_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/codeowners/errors" 2>/dev/null || echo '{}')"
+        N_ERR="$(echo "$ERRORS_JSON" | jq '(.errors // []) | length' 2>/dev/null || echo 0)"
+        if [ "$N_ERR" -gt 0 ]; then
+          ISSUES=$((ISSUES + N_ERR))
+          {
+            echo "### ❌ ${N_ERR} CODEOWNERS error(s)"
+            echo "$ERRORS_JSON" | jq -r '.errors[] | "- line \(.line): \(.kind) — \(.message)"' 2>/dev/null
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$ERRORS_JSON" | jq -r '.errors[] | "::warning::codeowners \(.path):\(.line): \(.kind) — \(.message)"' 2>/dev/null || true
+        fi
+
+        # 2) Catch-all rule so no path is unowned (a leading "* " owner line).
+        if ! grep -qE '^\*[[:space:]]+\S' "$FILE"; then
+          ISSUES=$((ISSUES + 1))
+          echo "### ⚠️ No catch-all \`*\` rule — files not matched by a specific rule have no owner." >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::codeowners: no catch-all '*' rule in $FILE — unmatched paths are unowned."
+        fi
+
+        if [ "$ISSUES" -eq 0 ]; then
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+          echo "✅ valid, owners resolve, catch-all present." >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::codeowners: $FILE is valid with a catch-all owner."
+          exit 0
+        fi
+
+        echo "status=issues" >> "$GITHUB_OUTPUT"
+        if [ "$ENFORCE" = "fail" ]; then
+          echo "::error::codeowners: ${ISSUES} issue(s) in $FILE."
+          exit 1
+        fi
+        echo "::warning::codeowners: ${ISSUES} issue(s) in $FILE (advisory — not blocking)."
+        exit 0

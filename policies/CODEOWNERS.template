@@ -1,0 +1,14 @@
+# CODEOWNERS — copy to .github/CODEOWNERS and adapt.
+# Syntax: <path-pattern>  <owner> [<owner>...]   (last matching rule wins)
+# Owners are @user, @org/team, or email. Prefer TEAMS over individuals so
+# ownership survives PTO/offboarding. Keep a catch-all so nothing is unowned.
+
+# Catch-all — every path has at least this owner (REQUIRED; the kit warns if absent).
+*                       @your-org/core
+
+# Examples — route sensitive areas to accountable teams:
+# /.github/             @your-org/platform
+# /infra/  *.tf         @your-org/infra
+# /auth/                @your-org/security
+# *.py                  @your-org/backend
+# /frontend/            @your-org/frontend

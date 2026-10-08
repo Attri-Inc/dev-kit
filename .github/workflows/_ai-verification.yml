@@ -1,0 +1,137 @@
+name: _ai-verification
+
+# Tier-overlay called from gate.yml.
+# Runs the AI-specific validation suite at qa+ tier (or explicitly requested).
+# Maps to the deep research findings on AI-code attack classes.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner for jobs (default ubuntu-latest; set self-hosted to use your own runners).'
+        type: string
+        default: 'ubuntu-latest'
+      tier:
+        type: string
+        required: true
+      run-medium:
+        type: string
+        default: 'false'
+      ai-detected:
+        type: string
+        description: 'true if ai-provenance flagged this PR as AI-authored'
+        default: 'false'
+      fail-on:
+        type: string
+        default: 'high'
+      skip-test-delta:
+        type: string
+        description: "'true' bypasses the test-delta gate (CI wrapper opt-out)."
+        default: 'false'
+      test-delta-bypass-label:
+        type: string
+        description: 'PR label that bypasses the test-delta gate when applied.'
+        default: 'tests-not-needed'
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  agent-rule-scan:
+    name: Agent rule-file scanner
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - name: Detect agent rule files
+        id: detect
+        run: |
+          if find . -maxdepth 4 \
+              \( -name 'CLAUDE.md' -o -name 'AGENTS.md' -o -name 'GEMINI.md' \
+                 -o -name '.cursorrules' -o -name '.clinerules' -o -name '.windsurfrules' \
+                 -o -name 'copilot-instructions.md' -o -name 'settings.json' \
+                 -o -name '.mcp.json' -o -name 'mcp_servers.json' -o -name 'SKILL.md' \) \
+              -not -path './.git/*' -not -path './node_modules/*' 2>/dev/null | grep -q .; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No agent rule files (CLAUDE.md, .cursorrules, MCP, etc.) — skipping scan."
+          fi
+      - uses: Attri-Inc/dev-kit/.github/actions/agent-rule-scanner@main
+        if: steps.detect.outputs.found == 'true'
+        with:
+          fail-on: ${{ inputs.fail-on }}
+          changed-only: ${{ inputs.tier == 'dev' && 'true' || 'false' }}
+
+  import-existence:
+    name: Import existence (slopsquat defense)
+    if: inputs.run-medium == 'true'
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - uses: Attri-Inc/dev-kit/.github/actions/import-existence@main
+        with:
+          fail-on: ${{ inputs.fail-on }}
+
+  exception-swallow:
+    name: Exception-swallow + auth-bypass detector
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - uses: Attri-Inc/dev-kit/.github/actions/exception-swallow@main
+        with:
+          fail-on: ${{ inputs.fail-on }}
+
+  test-delta:
+    name: Test delta gate
+    if: inputs.run-medium == 'true'
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - uses: Attri-Inc/dev-kit/.github/actions/test-delta@main
+        with:
+          min-prod-lines: '20'
+          fail-on-missing: ${{ inputs.tier == 'main' && 'true' || 'false' }}
+          skip: ${{ inputs.skip-test-delta }}
+          bypass-label: ${{ inputs.test-delta-bypass-label }}
+
+  lint-disable:
+    name: Lint-disable detector
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - uses: Attri-Inc/dev-kit/.github/actions/lint-disable-detector@main
+        with:
+          fail-on: ${{ inputs.tier == 'main' && 'medium' || 'high' }}
+
+  claude-security-review:
+    name: Anthropic claude-code-security-review (diff-only)
+    if: inputs.tier == 'main'
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Skip if ANTHROPIC_API_KEY not set
+        id: gate
+        env:
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "${KEY:-}" ]; then
+            echo "::notice::ANTHROPIC_API_KEY not configured — skipping claude-code-security-review."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v6
+        if: steps.gate.outputs.skip != 'true'
+        with: { fetch-depth: 0 }
+      - uses: anthropics/claude-code-security-review@0c6a49f1fa56a1d472575da86a94dbc1edb78eda # main
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          claude-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          comment-pr: true
+        continue-on-error: true

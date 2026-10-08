@@ -1,0 +1,162 @@
+name: _java
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner for jobs (default ubuntu-latest; set self-hosted to use your own runners).'
+        type: string
+        default: 'ubuntu-latest'
+      tier:
+        type: string
+        required: true
+      run-medium:
+        type: string
+        default: 'false'
+      fail-on:
+        type: string
+        default: 'high'
+      java-version:
+        type: string
+        default: '21'
+      diff-coverage-min:
+        description: 'Minimum % of CHANGED lines that must be covered by tests (patch coverage).'
+        type: string
+        default: '80'
+      diff-coverage-enforcement:
+        description: 'warn (advisory, default) | fail (block PRs below diff-coverage-min).'
+        type: string
+        default: 'warn'
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  detect:
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      build-tool: ${{ steps.d.outputs.bt }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: d
+        run: |
+          if [ -f pom.xml ]; then echo "bt=maven" >> "$GITHUB_OUTPUT"
+          elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then echo "bt=gradle" >> "$GITHUB_OUTPUT"
+          else echo "bt=none" >> "$GITHUB_OUTPUT"
+          fi
+
+  lint:
+    name: Lint (Checkstyle)
+    needs: detect
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: ${{ needs.detect.outputs.build-tool }}
+      - uses: nikitasavinov/checkstyle-action@79490c0fdcc3ab5dd2b50a0e82a5bfc4fe63f0a9 # 0.6.0
+        with:
+          reporter: github-pr-review
+          level: warning
+        continue-on-error: true
+
+  spotbugs:
+    name: SpotBugs
+    if: inputs.run-medium == 'true'
+    needs: detect
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: ${{ needs.detect.outputs.build-tool }}
+      - name: Build + SpotBugs
+        run: |
+          case "${{ needs.detect.outputs.build-tool }}" in
+            maven)  mvn -B -ntp -Dstyle.color=never spotbugs:check || true ;;
+            gradle) ./gradlew spotbugsMain --no-daemon --console=plain || true ;;
+          esac
+
+  deps-vulns:
+    name: Dependency-Check (OWASP)
+    if: inputs.run-medium == 'true'
+    needs: detect
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+      - uses: dependency-check/Dependency-Check_Action@75ba02d6183445fe0761d26e836bde58b1560600 # 1.1.0
+        with:
+          project: ${{ github.event.repository.name }}
+          path: .
+          format: 'SARIF'
+          out: 'reports'
+        env:
+          JAVA_HOME: /opt/jdk
+        continue-on-error: true
+      - uses: github/codeql-action/upload-sarif@v4
+        # Private repos without GHAS can't upload SARIF — don't block the gate.
+        continue-on-error: true
+        if: always() && hashFiles('reports/dependency-check-report.sarif') != '' && !github.event.repository.private
+        with:
+          sarif_file: reports/dependency-check-report.sarif
+          category: dependency-check
+
+  test:
+    name: Test
+    needs: detect
+    runs-on: ${{ inputs.runner }}
+    steps:
+      # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: ${{ needs.detect.outputs.build-tool }}
+      - name: Run tests
+        run: |
+          case "${{ needs.detect.outputs.build-tool }}" in
+            maven)  mvn -B -ntp -Dstyle.color=never test ;;
+            gradle) ./gradlew test --no-daemon --console=plain ;;
+            *)      echo "::warning::No build tool detected. Skipping tests." ;;
+          esac
+      # Consume-if-present: gate on a JaCoCo report if the build produces one
+      # (jacoco.xml for Maven, jacocoTestReport.xml for Gradle). Don't force the
+      # JaCoCo plugin on repos that haven't configured it. (warn-first)
+      - name: Locate JaCoCo report
+        id: cov
+        if: github.event_name == 'pull_request'
+        run: |
+          REPORT="$(find . \( -name 'jacoco.xml' -o -name 'jacocoTestReport.xml' \) 2>/dev/null | head -1)"
+          if [ -n "$REPORT" ]; then
+            echo "report=$REPORT" >> "$GITHUB_OUTPUT"
+          else
+            echo "report=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No JaCoCo report found. Enable the JaCoCo plugin (maven jacoco:report / gradle jacocoTestReport) to activate the patch-coverage gate."
+          fi
+      - uses: actions/setup-python@v6
+        if: steps.cov.outputs.report != ''
+        with:
+          python-version: '3.12'
+      - name: Diff coverage gate
+        if: steps.cov.outputs.report != ''
+        uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
+        with:
+          report: ${{ steps.cov.outputs.report }}
+          format: jacoco
+          base-ref: ${{ github.base_ref }}
+          min-coverage: ${{ inputs.diff-coverage-min }}
+          enforcement: ${{ inputs.diff-coverage-enforcement }}
+          src-roots: 'src/main/java src/main/kotlin'

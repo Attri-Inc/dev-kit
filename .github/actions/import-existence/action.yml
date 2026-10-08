@@ -1,0 +1,211 @@
+name: 'Import existence (slopsquat defense)'
+description: |
+  For every NEW dependency added in the diff, verifies it exists on the registry
+  AND has plausible reputation signals (download count, maintainer age, version count).
+  Defends against slopsquatting — AI-hallucinated package names that attackers register.
+  Real-world: Shai-Hulud 2.0 (Nov 2025) compromised 796 packages, 25K repos, 20M downloads.
+  Hallucination rate: 21.7% OSS / 5.2% commercial models (Spracklen et al. USENIX 2025).
+author: 'Attri Inc'
+
+inputs:
+  fail-on:
+    description: 'critical | high | medium'
+    required: false
+    default: 'high'
+  min-pypi-downloads:
+    description: 'PyPI: min 30-day downloads to consider non-suspicious'
+    required: false
+    default: '1000'
+  min-npm-age-days:
+    description: 'npm: min package age in days to consider non-suspicious'
+    required: false
+    default: '90'
+
+runs:
+  using: 'composite'
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        BASE: ${{ github.base_ref }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        set -euo pipefail
+        if [ -z "${BASE:-}" ]; then
+          echo "::notice::Not a PR — skipping import-existence."
+          exit 0
+        fi
+        git fetch origin "$BASE" --depth=50 2>/dev/null || true
+
+        VIOLATIONS=0
+        REPORT=""
+
+        # NOTE: every $(grep-pipeline) below is wrapped with explicit
+        # `set +o pipefail; ...; set -o pipefail` because grep returns 1 when
+        # there are no matches. Under `set -euo pipefail`, that exit-1
+        # propagates through the assignment and silently kills the action
+        # with no output. Empty pipeline result is the EXPECTED case (no
+        # changed deps, or none that pass the filters), not an error.
+
+        # ── Python ────────────────────────────────────────────────────
+        # Two sources of new packages:
+        #  1. requirements*.txt — one requirement per line, so the added lines
+        #     of the diff are the new packages.
+        #  2. pyproject.toml / Pipfile — TOML. Grepping their added lines turned
+        #     every config key (coverage `omit`, ruff `exclude`, mypy `module`, …)
+        #     into a "package" and blocked real PRs, so these are parsed
+        #     section-aware by new_python_deps.py: only dependency tables count,
+        #     and a name is new when it is in HEAD's manifest but not the base's.
+        NEW_PY_PKGS=""
+        REQ_CHANGED=$(git diff --name-only "origin/${BASE}...HEAD" -- '*requirements*.txt' 2>/dev/null || true)
+        if [ -n "$REQ_CHANGED" ]; then
+          set +o pipefail
+          NEW_PY_PKGS=$(git diff "origin/${BASE}...HEAD" -- '*requirements*.txt' 2>/dev/null \
+            | grep -E '^\+[^+]' | grep -ivE '^\+\+\+' \
+            | sed -E 's/^\+[[:space:]]*//; s/[<>=!~;].*//; s/[\[].*//; s/#.*//; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+            | grep -E '^[a-zA-Z][a-zA-Z0-9_.-]*$' \
+            | tr '[:upper:]' '[:lower:]' | sort -u)
+          set -o pipefail
+        fi
+        set +o pipefail
+        TOML_CHANGED=$(git diff --name-only "origin/${BASE}...HEAD" 2>/dev/null | grep -E '(^|/)(pyproject\.toml|Pipfile)$' || true)
+        set -o pipefail
+        if [ -n "$TOML_CHANGED" ]; then
+          MERGE_BASE=$(git merge-base "origin/${BASE}" HEAD 2>/dev/null || echo "origin/${BASE}")
+          for manifest in $TOML_CHANGED; do
+            [ -f "$manifest" ] || continue   # deleted in this PR: nothing new
+            base_copy=$(mktemp)
+            git show "${MERGE_BASE}:${manifest}" > "$base_copy" 2>/dev/null || : > "$base_copy"
+            if added=$(python3 "${GITHUB_ACTION_PATH}/new_python_deps.py" "$base_copy" "$manifest"); then
+              NEW_PY_PKGS=$(printf '%s\n%s\n' "$NEW_PY_PKGS" "$added" | grep -v '^$' | sort -u)
+            else
+              echo "::warning::Could not parse ${manifest} for new dependencies (python3 with tomllib needed) — skipping it (fail-open)."
+            fi
+            rm -f "$base_copy"
+          done
+        fi
+        if [ -n "$NEW_PY_PKGS" ]; then
+          for pkg in $NEW_PY_PKGS; do
+            [ -z "$pkg" ] && continue
+            # Hit PyPI JSON API (read-only, no auth needed). Distinguish a real
+            # 404 (package doesn't exist → slopsquat) from a transient failure
+            # (429 rate-limit / 5xx / DNS / timeout). The previous code treated
+            # ANY non-2xx as "DOES NOT EXIST" and hard-blocked the merge on
+            # registry flakiness — so we now fail OPEN on transient errors. (audit M2)
+            http=$(curl -sS -m 8 -o /tmp/pypi_resp.json -w '%{http_code}' "https://pypi.org/pypi/${pkg}/json" 2>/dev/null || echo "000")
+            if [ "$http" = "404" ]; then
+              REPORT+="| 🔴 CRITICAL | python | $pkg | DOES NOT EXIST on PyPI (slopsquat suspect) |"$'\n'
+              VIOLATIONS=$((VIOLATIONS + 1))
+            elif [ "$http" = "200" ]; then
+              # Reputation check via pypistats. The API rate-limits and intermittently
+              # returns 0/empty; treating 0 as "low downloads" produces false positives
+              # on hugely-popular packages (e.g. python-dotenv has millions/mo). Only
+              # flag MEDIUM when we got a positive number AND it's below the threshold.
+              dl=$(curl -sSf -m 5 "https://pypistats.org/api/packages/${pkg}/recent" 2>/dev/null | jq -r '.data.last_month // 0' 2>/dev/null || echo "0")
+              if [ "$dl" -gt 0 ] && [ "$dl" -lt "${{ inputs.min-pypi-downloads }}" ] 2>/dev/null; then
+                REPORT+="| 🟡 MEDIUM | python | $pkg | low downloads ($dl/mo) — verify maintainer |"$'\n'
+                VIOLATIONS=$((VIOLATIONS + 1))
+              fi
+            else
+              echo "::warning::Could not verify '$pkg' on PyPI (HTTP $http) — skipping to avoid a false slopsquat block (fail-open)."
+            fi
+          done
+        fi
+
+        # ── npm ───────────────────────────────────────────────────────
+        NPM_CHANGED=$(git diff --name-only "origin/${BASE}...HEAD" -- 'package.json' 2>/dev/null || true)
+        if [ -n "$NPM_CHANGED" ]; then
+          set +o pipefail
+          NEW_NPM_PKGS=$(git diff "origin/${BASE}...HEAD" -- 'package.json' 2>/dev/null \
+            | grep -E '^\+\s*"' | grep -ivE '^\+\+\+' \
+            | grep -ivE '"(name|version|description|main|scripts|repository|author|license|engines|keywords|files|workspaces|type)"' \
+            | grep -oE '"@?[a-z0-9_-]+(/[a-z0-9_-]+)?":' \
+            | tr -d '":' \
+            | sort -u)
+          set -o pipefail
+          for pkg in $NEW_NPM_PKGS; do
+            [ -z "$pkg" ] && continue
+            # npm registry GET (no auth needed for public packages). As with
+            # PyPI above, only a real 404 means "doesn't exist"; transient
+            # errors fail open rather than hard-blocking the merge. (audit M2)
+            http=$(curl -sS -m 8 -o /tmp/npm_resp.json -w '%{http_code}' "https://registry.npmjs.org/${pkg}" 2>/dev/null || echo "000")
+            if [ "$http" = "404" ]; then
+              REPORT+="| 🔴 CRITICAL | npm | $pkg | DOES NOT EXIST on npm (slopsquat suspect) |"$'\n'
+              VIOLATIONS=$((VIOLATIONS + 1))
+            elif [ "$http" = "200" ]; then
+              # Age check
+              created=$(jq -r '.time.created // empty' /tmp/npm_resp.json 2>/dev/null || echo "")
+              if [ -n "$created" ]; then
+                # GNU date (Linux runners) parses ISO-8601 with -d; the BSD form
+                # (-j -f) is the macOS fallback. The previous code only had the
+                # BSD form, so on ubuntu-latest this silently yielded epoch 0 and
+                # the age check never fired. (audit M2)
+                created_epoch=$(date -u -d "$created" '+%s' 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S' "${created%%.*}" '+%s' 2>/dev/null || echo "0")
+                now_epoch=$(date -u '+%s')
+                if [ "$created_epoch" -gt 0 ]; then
+                  age_days=$(( (now_epoch - created_epoch) / 86400 ))
+                  if [ "$age_days" -lt "${{ inputs.min-npm-age-days }}" ]; then
+                    REPORT+="| 🟡 MEDIUM | npm | $pkg | very new ($age_days days old) — verify origin |"$'\n'
+                    VIOLATIONS=$((VIOLATIONS + 1))
+                  fi
+                fi
+              fi
+            else
+              echo "::warning::Could not verify '$pkg' on npm (HTTP $http) — skipping to avoid a false slopsquat block (fail-open)."
+            fi
+          done
+        fi
+
+        # ── Go ────────────────────────────────────────────────────────
+        # Note: hyphen MUST be last in bracket expression — GNU grep otherwise
+        # interprets `\-/` as range backslash-to-slash and errors with
+        # "Invalid range end", crashing the script before scan completes.
+        GO_CHANGED=$(git diff --name-only "origin/${BASE}...HEAD" -- 'go.mod' 2>/dev/null || true)
+        if [ -n "$GO_CHANGED" ]; then
+          set +o pipefail
+          NEW_GO_PKGS=$(git diff "origin/${BASE}...HEAD" -- 'go.mod' 2>/dev/null \
+            | grep -E '^\+[[:space:]]+[a-z0-9./-]+[[:space:]]+v' | grep -ivE '^\+\+\+' \
+            | awk '{print $2}' | sort -u)
+          set -o pipefail
+          for pkg in $NEW_GO_PKGS; do
+            [ -z "$pkg" ] && continue
+            # Only a real 404 means "doesn't exist"; transient errors fail open. (audit M2)
+            http=$(curl -sS -m 8 -o /dev/null -w '%{http_code}' "https://pkg.go.dev/${pkg}" 2>/dev/null || echo "000")
+            if [ "$http" = "404" ]; then
+              REPORT+="| 🔴 CRITICAL | go | $pkg | DOES NOT EXIST on pkg.go.dev (slopsquat suspect) |"$'\n'
+              VIOLATIONS=$((VIOLATIONS + 1))
+            elif [ "$http" != "200" ]; then
+              echo "::warning::Could not verify '$pkg' on pkg.go.dev (HTTP $http) — skipping to avoid a false slopsquat block (fail-open)."
+            fi
+          done
+        fi
+
+        # ── Render summary ────────────────────────────────────────────
+        if [ "$VIOLATIONS" -gt 0 ]; then
+          {
+            echo "## ❌ Hallucinated / suspicious packages: $VIOLATIONS"
+            echo ""
+            echo "| Severity | Ecosystem | Package | Reason |"
+            echo "|---|---|---|---|"
+            printf '%s' "$REPORT"
+            echo ""
+            echo "**Why this matters:** Slopsquatting (Shai-Hulud 2.0, Nov 2025) compromised 25K repos / 20M downloads via attackers who pre-registered AI-hallucinated package names. AI hallucination rate: 21.7% (OSS models) / 5.2% (commercial)."
+            echo ""
+            echo "**Action:** verify each \`CRITICAL\` package is real and intentional. If suspect, remove from manifest and re-run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Fail on critical only by default
+          CRIT_COUNT=$(echo "$REPORT" | grep -c "CRITICAL" || true)
+          if [ "$FAIL_ON" = "medium" ] && [ "$VIOLATIONS" -gt 0 ]; then
+            exit 1
+          elif [ "$FAIL_ON" = "high" ] && [ "$CRIT_COUNT" -gt 0 ]; then
+            echo "::error::Hallucinated package detected — refusing merge."
+            exit 1
+          elif [ "$FAIL_ON" = "critical" ] && [ "$CRIT_COUNT" -gt 0 ]; then
+            echo "::error::Hallucinated package detected — refusing merge."
+            exit 1
+          fi
+          echo "::warning::$VIOLATIONS suspicious dep(s) below threshold $FAIL_ON."
+        else
+          echo "::notice::✅ All new dependencies exist on their registries with reasonable reputation."
+        fi

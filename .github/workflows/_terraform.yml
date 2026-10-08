@@ -1,0 +1,214 @@
+name: _terraform
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner for jobs (default ubuntu-latest; set self-hosted to use your own runners).'
+        type: string
+        default: 'ubuntu-latest'
+      tier:
+        type: string
+        required: true
+      run-medium:
+        type: string
+        default: 'false'
+      fail-on:
+        type: string
+        default: 'high'
+      terraform-version:
+        type: string
+        default: 'latest'
+      enable-plan:
+        description: 'Run terraform plan against remote state. Requires AZURE_CLIENT_ID/TENANT_ID/SUBSCRIPTION_ID secrets via OIDC.'
+        type: boolean
+        default: false
+      plan-working-directory:
+        type: string
+        default: '.'
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  fmt-validate:
+    name: fmt + validate
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+      - run: terraform fmt -check -recursive
+      - name: terraform init + validate (each module)
+        shell: bash
+        run: |
+          set -e
+          while IFS= read -r dir; do
+            echo "::group::$dir"
+            (cd "$dir" && terraform init -backend=false -input=false && terraform validate -no-color)
+            echo "::endgroup::"
+          done < <(find . -name '*.tf' -not -path './.terraform/*' -exec dirname {} \; | sort -u)
+
+  tflint:
+    name: TFLint
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: terraform-linters/setup-tflint@v6
+      - run: tflint --init
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Default failure severity is "warning" — that blocks any pre-existing
+      # tflint warning (unused vars, missing version constraints, etc.) on
+      # first onboarding. Raise to error so warnings only show as job
+      # annotations; consumers can tighten back via repo-local .tflint.hcl.
+      - run: tflint --recursive --format=compact --minimum-failure-severity=error
+
+  checkov:
+    name: Checkov
+    if: inputs.run-medium == 'true'
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: bridgecrewio/checkov-action@fa9edf8f0a491c59a924ea6accd5bdcf07752cff # v12.3107.0
+        with:
+          directory: .
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov.sarif
+          soft_fail: true
+      - uses: github/codeql-action/upload-sarif@v4
+        # Private repos without GHAS can't upload SARIF — don't block the gate.
+        continue-on-error: true
+        if: always() && hashFiles('checkov.sarif') != '' && !github.event.repository.private
+        with:
+          sarif_file: checkov.sarif
+          category: checkov
+
+  plan:
+    name: terraform plan (remote state)
+    if: inputs.enable-plan == true
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+      - name: Plan
+        working-directory: ${{ inputs.plan-working-directory }}
+        run: |
+          terraform init -input=false
+          terraform plan -no-color -input=false -out=tfplan | tee /tmp/plan.txt
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('/tmp/plan.txt', 'utf8').slice(0, 60000);
+            const body = "### Terraform Plan\n```\n" + plan + "\n```";
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+  trivy-iac:
+    name: Trivy IaC scan
+    if: inputs.run-medium == 'true'
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache Trivy DB
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-iac-${{ runner.os }}
+      # Binary rather than trivy-action, which runs Trivy in a container and
+      # needs a Docker daemon. Preinstalled on self-hosted runner images.
+      - name: Check for Trivy
+        id: trivy
+        shell: bash
+        env:
+          WANT: '0.74.0'
+        run: |
+          set -uo pipefail
+          have="$(trivy --version 2>/dev/null | head -1 | awk '{print $2}' || true)"
+          if [ "$have" = "$WANT" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Trivy ${WANT} not present (found: ${have:-none}) — installing."
+          fi
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        if: steps.trivy.outputs.present != 'true'
+        with:
+          version: v0.74.0
+          cache: true
+      - name: Trivy IaC scan
+        shell: bash
+        run: |
+          set -uo pipefail
+          # `trivy config` uses bundled misconfiguration policies rather than the
+          # vulnerability DB, so no --skip-db-update handling is needed here.
+          trivy config \
+            --format sarif \
+            --output trivy-iac.sarif \
+            --severity HIGH,CRITICAL \
+            --exit-code 0 \
+            .
+      - uses: github/codeql-action/upload-sarif@v4
+        # Private repos without GHAS can't upload SARIF — don't block the gate.
+        continue-on-error: true
+        if: always() && hashFiles('trivy-iac.sarif') != '' && !github.event.repository.private
+        with:
+          sarif_file: trivy-iac.sarif
+          category: trivy-iac
+
+  infracost:
+    name: Infracost (cost diff)
+    if: inputs.tier == 'main'
+    runs-on: ${{ inputs.runner }}
+    env:
+      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+    steps:
+      - name: Skip if INFRACOST_API_KEY not set
+        id: gate
+        run: |
+          if [ -z "${INFRACOST_API_KEY:-}" ]; then
+            echo "::notice::INFRACOST_API_KEY not configured — skipping infracost."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v6
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+      - uses: infracost/actions/setup@v4
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+      - name: Generate baseline cost
+        if: steps.gate.outputs.skip != 'true'
+        run: infracost breakdown --path=. --format=json --out-file=/tmp/infracost-base.json || true
+      - uses: actions/checkout@v6
+        if: steps.gate.outputs.skip != 'true'
+      - name: Generate diff
+        if: steps.gate.outputs.skip != 'true'
+        run: infracost diff --path=. --format=json --compare-to=/tmp/infracost-base.json --out-file=/tmp/infracost.json || true
+      - run: infracost comment github --path="/tmp/infracost.json" --repo="$GITHUB_REPOSITORY" --pull-request="${{ github.event.pull_request.number }}" --github-token="${{ secrets.GITHUB_TOKEN }}" --behavior=update
+        if: github.event_name == 'pull_request' && steps.gate.outputs.skip != 'true'

@@ -1,0 +1,45 @@
+name: 'JS codegen'
+description: >
+  Runs first-party code generators (currently Prisma) that produce the
+  TypeScript types lint and type-check depend on. The gate installs with
+  --ignore-scripts as supply-chain defense, which skips the postinstall hook
+  these generators normally run from. This step re-runs ONLY known, detected,
+  first-party generators by name — never arbitrary third-party postinstall
+  hooks — so the supply-chain protection is preserved.
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Prisma generate (types only)
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Detect a Prisma schema. Conventional path first, then the
+        # package.json `prisma.schema` override, then a Prisma 6+ config file.
+        SCHEMA=""
+        if [ -f prisma/schema.prisma ]; then
+          SCHEMA="prisma/schema.prisma"
+        elif [ -f package.json ]; then
+          CFG=$(jq -r '.prisma.schema // empty' package.json 2>/dev/null || true)
+          if [ -n "$CFG" ] && [ -e "$CFG" ]; then SCHEMA="$CFG"; fi
+        fi
+        if [ -z "$SCHEMA" ] && { [ -f prisma.config.ts ] || [ -f prisma.config.js ] || [ -f prisma.config.mjs ]; }; then
+          SCHEMA="(prisma.config)"
+        fi
+
+        if [ -z "$SCHEMA" ]; then
+          echo "::notice::No Prisma schema detected — skipping codegen."
+          exit 0
+        fi
+
+        if [ ! -x ./node_modules/.bin/prisma ]; then
+          echo "::warning::Prisma schema found ($SCHEMA) but the prisma CLI is not installed — skipping codegen. Add 'prisma' to devDependencies if type-check needs the generated client."
+          exit 0
+        fi
+
+        # --no-engine: lint/type-check only need the generated TYPES, not the
+        # query engine binary, so we skip the engine download entirely (faster,
+        # and unaffected by --ignore-scripts having skipped @prisma/engines).
+        echo "::notice::Prisma schema detected ($SCHEMA) — generating client types (--no-engine)."
+        ./node_modules/.bin/prisma generate --no-engine

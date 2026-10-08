@@ -1,0 +1,57 @@
+name: Attri Dev Kit
+
+on:
+  push:
+    branches: [main, master, dev, dev-*, develop, qa, uat, staging]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/CODEOWNERS'
+      - 'LICENSE'
+      - '*.txt'
+      - '.gitignore'
+      - '.editorconfig'
+  pull_request:
+    branches: [main, master, dev, dev-*, develop, qa, uat, staging, release/*]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/CODEOWNERS'
+      - 'LICENSE'
+      - '*.txt'
+      - '.gitignore'
+      - '.editorconfig'
+  # Daily nightly run for attestation jobs (Scorecard + SBOM + Sigstore).
+  # By default, these only run on `schedule:` triggers —
+  # saves ~$80-100/mo by attesting once/day instead of per-merge. Override
+  # via `attestation-frequency: per-commit` if you need per-merge signing.
+  # Off-hour minute (07:17 UTC) to avoid GitHub cron herd contention.
+  schedule:
+    - cron: '17 7 * * *'
+
+concurrency:
+  group: attri-dev-kit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+  id-token: write
+  attestations: write
+  actions: read
+
+jobs:
+  attri-dev-kit:
+    uses: Attri-Inc/dev-kit/.github/workflows/gate.yml@main
+    with:
+      tier: auto
+      languages: java,docker
+      fail-on: high
+    # The kit needs no secrets. Pass only the optional ones you use. Avoid
+    # `secrets: inherit`: it hands every repo and org secret to this workflow.
+    # secrets:
+    #   GOOGLE_CHAT_WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}  # alert on gate failure
+    #   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}              # claude-code-security-review

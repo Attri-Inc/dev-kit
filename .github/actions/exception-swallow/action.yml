@@ -1,0 +1,128 @@
+name: 'Exception swallow detector'
+description: |
+  Greps the diff for AI-favorite "swallow the error and pretend it's fine" patterns:
+    - Python: `except: pass`, `except Exception: pass`, `except: return None`
+    - JS/TS: `catch (_) {}`, `catch {}`, `try { ... } catch { /* nothing */ }`
+    - Go: `if err != nil { /* TODO */ }`, `_ = err`
+    - Java: `catch (Exception e) {}`, `catch (Throwable t) {}`
+    - C#: `catch { }`, `catch (Exception) { }`
+  Maps directly to b-h-knowledge-bot-fe's three "bypassing microsoft auth for prod"
+  commits — those were AI-generated and the gate caught nothing.
+author: 'Attri Inc'
+
+inputs:
+  fail-on:
+    description: 'critical | high | medium | low — minimum severity to fail'
+    required: false
+    default: 'high'
+
+runs:
+  using: 'composite'
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        BASE: ${{ github.base_ref }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        set -euo pipefail
+        if [ -z "${BASE:-}" ]; then
+          echo "::notice::Not a PR — skipping exception-swallow."
+          exit 0
+        fi
+        git fetch origin "$BASE" --depth=50 2>/dev/null || true
+
+        # Get only added lines (lines starting with "+", excluding +++ headers)
+        DIFF=$(git diff "origin/${BASE}...HEAD" --unified=0 -- \
+          '*.py' '*.js' '*.jsx' '*.ts' '*.tsx' '*.go' '*.java' '*.cs' '*.rb' \
+          ':(exclude)tests/**' ':(exclude)test/**' ':(exclude)*_test.go' ':(exclude)*.test.*' ':(exclude)*.spec.*' \
+          2>/dev/null || echo "")
+
+        if [ -z "$DIFF" ]; then
+          echo "::notice::No source-file changes to scan."
+          exit 0
+        fi
+
+        VIOLATIONS=0
+        REPORT=""
+        CRIT=0; HIGH=0; MED=0
+
+        flag() {
+          local sev="$1" lang="$2" detail="$3"
+          REPORT+="| $sev | $lang | $detail |"$'\n'
+          VIOLATIONS=$((VIOLATIONS + 1))
+          case "$sev" in
+            CRITICAL) CRIT=$((CRIT+1)) ;;
+            HIGH)     HIGH=$((HIGH+1)) ;;
+            MEDIUM)   MED=$((MED+1)) ;;
+          esac
+        }
+
+        # Walk added lines only
+        ADDED=$(echo "$DIFF" | grep -E '^\+' | grep -ivE '^\+\+\+' || true)
+
+        # Python — bare except: pass / Exception: pass / return None
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          flag CRITICAL python "$(echo "$line" | sed 's/^\+//; s/^[[:space:]]*//' | head -c 100)"
+        done < <(echo "$ADDED" | grep -E '^\+\s*except\s*:?\s*(Exception|BaseException)?\s*:\s*(pass|return\s*None?|continue)$')
+
+        # JS/TS — catch with empty body, or catch (_) {}
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          flag CRITICAL js/ts "$(echo "$line" | sed 's/^\+//; s/^[[:space:]]*//' | head -c 100)"
+        done < <(echo "$ADDED" | grep -E '^\+.*catch\s*\(\s*[_a-zA-Z0-9]*\s*\)\s*\{\s*\}|^\+.*catch\s*\{\s*\}')
+
+        # Java/C# — catch with empty body
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          flag CRITICAL java/cs "$(echo "$line" | sed 's/^\+//; s/^[[:space:]]*//' | head -c 100)"
+        done < <(echo "$ADDED" | grep -E '^\+.*catch\s*\([^)]*\)\s*\{\s*\}')
+
+        # Go — discarded error: _ = err / err = nil after check
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          flag HIGH go "$(echo "$line" | sed 's/^\+//; s/^[[:space:]]*//' | head -c 100)"
+        done < <(echo "$ADDED" | grep -E '^\+\s*_\s*=\s*err\s*$')
+
+        # Auth-bypass markers (any language) — extracted from real audit findings
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          flag CRITICAL any "AUTH-BYPASS PHRASE: $(echo "$line" | sed 's/^\+//; s/^[[:space:]]*//' | head -c 100)"
+        done < <(echo "$ADDED" | grep -iE '^\+.*((bypass|skip|disable|temporarily disable).*(auth|mfa|verification|sso|login)|admin.*disabled|set.*admin.*=.*true|isAdmin.*=.*true|allow_unauthenticated)')
+
+        # Hardcoded test/debug flags in non-test code
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          flag HIGH any "DEBUG/TEST FLAG: $(echo "$line" | sed 's/^\+//; s/^[[:space:]]*//' | head -c 100)"
+        done < <(echo "$ADDED" | grep -iE '^\+.*(DEBUG\s*=\s*True|debug:\s*true|TESTING\s*=\s*True|MOCK_AUTH|FAKE_AUTH|SKIP_AUTH)')
+
+        if [ "$VIOLATIONS" -gt 0 ]; then
+          {
+            echo "## ❌ Exception-swallow / auth-bypass detector: $VIOLATIONS finding(s)"
+            echo ""
+            echo "| Severity | Language | Snippet (first 100 chars) |"
+            echo "|---|---|---|"
+            printf '%s' "$REPORT"
+            echo ""
+            echo "**Why this matters:** AI commonly generates \`except: pass\` / empty \`catch\` / explicit auth-bypass patterns when 'fixing' code. Real example: \`b-h-knowledge-bot-fe\` shipped 3 commits 'bypassing microsoft auth for prod' (#18, #19, #21) — every check passed."
+            echo ""
+            echo "**Action:** handle the exception explicitly (log + propagate, log + circuit-break, or remove the try entirely). If it's intentional, add a comment explaining WHY and the gate will allow it on next iteration."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          should_fail=false
+          case "$FAIL_ON" in
+            critical)            [ "$CRIT" -gt 0 ] && should_fail=true ;;
+            high)                [ "$CRIT" -gt 0 ] || [ "$HIGH" -gt 0 ] && should_fail=true ;;
+            medium)              [ "$VIOLATIONS" -gt 0 ] && should_fail=true ;;
+          esac
+
+          if [ "$should_fail" = true ]; then
+            echo "::error::exception-swallow: $CRIT critical, $HIGH high, $MED medium (threshold: $FAIL_ON)"
+            exit 1
+          else
+            echo "::warning::exception-swallow: $VIOLATIONS finding(s) below threshold $FAIL_ON"
+          fi
+        else
+          echo "::notice::✅ No exception-swallow / auth-bypass / debug-flag patterns added."
+        fi

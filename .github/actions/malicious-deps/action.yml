@@ -1,0 +1,96 @@
+name: 'Malicious dependency detection (OSV malicious-packages)'
+description: |
+  Flags dependencies present in OSV's malicious-packages dataset (MAL-* advisories)
+  — packages that are deliberately backdoored, not merely vulnerable. This is
+  distinct from CVE/vuln scanning: it answers "do I have known MALWARE in my
+  dependency tree?". Runs OSV-Scanner (Google, cross-ecosystem) from its pinned
+  Docker image and reports only MAL-* hits. Warn-first, but a hit is CRITICAL.
+author: 'Attri Inc'
+
+inputs:
+  path:
+    description: 'Directory to scan.'
+    required: false
+    default: '.'
+  enforcement:
+    description: 'warn (advisory, default) | fail (block on any malicious package).'
+    required: false
+    default: 'warn'
+  osv-version:
+    description: 'OSV-Scanner release tag (binary is downloaded from GitHub releases).'
+    required: false
+    default: 'v1.9.2'
+
+outputs:
+  malicious-count:
+    description: 'Number of dependencies matched to an OSV MAL-* advisory.'
+    value: ${{ steps.scan.outputs.malicious-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        SCAN_PATH: ${{ inputs.path }}
+        ENFORCE: ${{ inputs.enforcement }}
+        OSV_VERSION: ${{ inputs.osv-version }}
+      run: |
+        set -uo pipefail
+        echo "malicious-count=0" >> "$GITHUB_OUTPUT"
+
+        # osv-scanner is a single static Go binary — no Docker daemon, and no
+        # ghcr.io pull (which a Docker Hub pull-through cache would not cover).
+        # Preinstalled on self-hosted runner images; download only when absent
+        # or version-mismatched so an explicit osv-version is still honoured.
+        WANT="${OSV_VERSION#v}"
+        HAVE="$(osv-scanner --version 2>/dev/null | head -1 | awk '{print $NF}' || true)"
+        if [ "$HAVE" = "$WANT" ]; then
+          echo "::notice::malicious-deps: osv-scanner ${WANT} preinstalled."
+        else
+          echo "::notice::malicious-deps: installing osv-scanner ${WANT} (found: ${HAVE:-none})."
+          curl -fsSL -o /tmp/osv-scanner \
+            "https://github.com/google/osv-scanner/releases/download/v${WANT}/osv-scanner_linux_amd64" || {
+              echo "::error::malicious-deps: download failed."; exit 1; }
+          sudo install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner
+          rm -f /tmp/osv-scanner
+        fi
+
+        # OSV-Scanner exits non-zero when it finds anything; capture JSON regardless.
+        osv-scanner \
+          --format json --recursive --skip-git "${SCAN_PATH}" > osv.json 2>/dev/null || true
+
+        if [ ! -s osv.json ]; then
+          echo "::notice::malicious-deps: no OSV output (no recognized lockfiles?) — skipping."
+          exit 0
+        fi
+
+        # Keep ONLY malicious-package advisories (MAL-*); vulns are covered elsewhere.
+        mapfile -t MAL < <(jq -r '
+          .results[]?.packages[]? | .package as $p
+          | (.vulnerabilities[]? | select(.id | startswith("MAL-"))
+             | "\($p.name)@\($p.version) :: \(.id)")' osv.json 2>/dev/null | sort -u)
+
+        if [ "${#MAL[@]}" -eq 0 ]; then
+          echo "::notice::✅ malicious-deps: no known-malicious packages (OSV MAL-*) in the dependency tree."
+          exit 0
+        fi
+
+        echo "malicious-count=${#MAL[@]}" >> "$GITHUB_OUTPUT"
+        {
+          echo "## 🚨 Malicious dependencies (OSV malicious-packages)"
+          echo ""
+          echo "These dependencies match a confirmed-malicious advisory (NOT just a CVE):"
+          echo ""
+          for m in "${MAL[@]}"; do echo "- \`$m\`"; done
+          echo ""
+          echo "**Action:** remove/replace immediately and rotate any secrets the build had access to."
+        } >> "$GITHUB_STEP_SUMMARY"
+        for m in "${MAL[@]}"; do echo "::error::malicious-deps: known-malicious package — $m"; done
+
+        if [ "$ENFORCE" = "fail" ]; then
+          echo "::error::malicious-deps: ${#MAL[@]} known-malicious package(s) in the dependency tree."
+          exit 1
+        fi
+        echo "::warning::malicious-deps: ${#MAL[@]} known-malicious package(s) (advisory — STRONGLY consider enforcement=fail)."
+        exit 0
