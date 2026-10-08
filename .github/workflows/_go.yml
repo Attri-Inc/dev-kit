@@ -108,7 +108,7 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       # setup-python gives a clean (non-PEP-668-locked) Python so the gate can
       # pip-install diff-cover; the Go job otherwise has no Python toolchain.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: hashFiles('coverage.out') != '' && github.event_name == 'pull_request'
         with:
           python-version: '3.12'
