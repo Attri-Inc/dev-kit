@@ -43,7 +43,7 @@ jobs:
     name: Agent rule-file scanner
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Detect agent rule files
         id: detect
@@ -70,7 +70,7 @@ jobs:
     if: inputs.run-medium == 'true'
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - uses: Attri-Inc/dev-kit/.github/actions/import-existence@main
         with:
@@ -80,7 +80,7 @@ jobs:
     name: Exception-swallow + auth-bypass detector
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - uses: Attri-Inc/dev-kit/.github/actions/exception-swallow@main
         with:
@@ -91,7 +91,7 @@ jobs:
     if: inputs.run-medium == 'true'
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - uses: Attri-Inc/dev-kit/.github/actions/test-delta@main
         with:
@@ -104,7 +104,7 @@ jobs:
     name: Lint-disable detector
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - uses: Attri-Inc/dev-kit/.github/actions/lint-disable-detector@main
         with:
@@ -126,7 +126,7 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: steps.gate.outputs.skip != 'true'
         with: { fetch-depth: 0 }
       - uses: anthropics/claude-code-security-review@0c6a49f1fa56a1d472575da86a94dbc1edb78eda # main

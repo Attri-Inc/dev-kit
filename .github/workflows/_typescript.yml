@@ -55,7 +55,7 @@ jobs:
       has-tests: ${{ steps.detect.outputs.has-tests }}
       has-build: ${{ steps.detect.outputs.has-build }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: detect
         shell: bash
         run: |
@@ -86,7 +86,7 @@ jobs:
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: biomejs/setup-biome@v2
       - run: biome ci .
 
@@ -96,7 +96,7 @@ jobs:
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Setup pnpm
         # actions/setup-node@v6 with `cache: pnpm` calls pnpm to resolve the
         # cache directory; without pnpm on PATH it fails with "Unable to
@@ -159,7 +159,7 @@ jobs:
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Setup pnpm
         # actions/setup-node@v6 with `cache: pnpm` calls pnpm to resolve the
         # cache directory; without pnpm on PATH it fails with "Unable to
@@ -197,7 +197,7 @@ jobs:
     # Docker daemon on the runner, and self-hosted runners get a fresh, empty
     # dind per job — so every run re-pulled the image (~22s) for no benefit.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Self-hosted runner images ship Semgrep preinstalled at the pinned
       # version. Detect that first so the install steps (including setup-python,
       # which the GitHub-hosted fallback needs for a usable pip) are skipped
@@ -245,7 +245,7 @@ jobs:
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Setup pnpm
         # actions/setup-node@v6 with `cache: pnpm` calls pnpm to resolve the
         # cache directory; without pnpm on PATH it fails with "Unable to
@@ -287,7 +287,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Setup pnpm
@@ -357,7 +357,7 @@ jobs:
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Setup pnpm
         # actions/setup-node@v6 with `cache: pnpm` calls pnpm to resolve the
         # cache directory; without pnpm on PATH it fails with "Unable to
@@ -385,7 +385,7 @@ jobs:
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Setup pnpm
         if: needs.detect-tooling.outputs.package-manager == 'pnpm'
         uses: pnpm/action-setup@v6
