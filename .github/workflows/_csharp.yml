@@ -41,7 +41,7 @@ jobs:
     # Installed rather than run via `container: semgrep/semgrep` — see the
     # matching note in _typescript.yml. Avoids requiring a Docker daemon.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # See the matching note in _typescript.yml: skip the install entirely when
       # the runner image already ships the pinned Semgrep.
       - name: Check for Semgrep
@@ -84,7 +84,7 @@ jobs:
     name: dotnet format
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ inputs.dotnet-version }}
@@ -98,7 +98,7 @@ jobs:
     runs-on: ${{ inputs.runner }}
     steps:
       # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: actions/setup-dotnet@v4

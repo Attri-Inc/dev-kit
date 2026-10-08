@@ -384,7 +384,7 @@ jobs:
       run-medium: ${{ steps.tier.outputs.run-medium }}
       docs-only: ${{ steps.docsonly.outputs.docs-only }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       # ── Escape hatch: .attri-dev-kit-skip file no-ops the entire kit ──
       - id: skip
@@ -498,7 +498,7 @@ jobs:
     if: needs.detect.outputs.kit-skip == 'false'
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Skip if no workflow files changed
         id: filter
@@ -558,7 +558,7 @@ jobs:
     if: needs.detect.outputs.kit-skip == 'false'
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: ${{ needs.detect.outputs.tier == 'dev' && 1 || 0 }}
       - uses: Attri-Inc/dev-kit/.github/actions/detect-secrets@main
@@ -583,7 +583,7 @@ jobs:
     if: needs.detect.outputs.kit-skip == 'false'
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Committer identity
         if: ${{ !cancelled() }}
@@ -708,7 +708,7 @@ jobs:
     if: needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Trojan Source + homoglyph
         if: ${{ !cancelled() }}
@@ -734,7 +734,7 @@ jobs:
     if: needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && (github.event_name == 'pull_request' || needs.detect.outputs.run-medium == 'true')
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Dependency cooldown + confusion
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
@@ -773,7 +773,7 @@ jobs:
     outputs:
       ai-authored: ${{ steps.prov.outputs.ai-authored }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - id: prov
         uses: Attri-Inc/dev-kit/.github/actions/ai-provenance@main
@@ -923,7 +923,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { persist-credentials: false }
       - uses: ossf/scorecard-action@v2.4.3
         with:
@@ -949,7 +949,7 @@ jobs:
     outputs:
       artifact-path: ${{ steps.build.outputs.artifact-path }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - id: build
         uses: Attri-Inc/dev-kit/.github/actions/build-artifact@main
@@ -969,7 +969,7 @@ jobs:
     if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule')
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: built-artifact
@@ -1053,7 +1053,7 @@ jobs:
     if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - uses: Attri-Inc/dev-kit/.github/actions/migration-safety@main
 
@@ -1169,7 +1169,7 @@ jobs:
       actions: read   # read which jobs/steps failed in this run
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: Attri-Inc/dev-kit/.github/actions/notify-gchat-ci@main
         with:
           webhook_url: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}

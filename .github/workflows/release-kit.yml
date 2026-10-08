@@ -17,7 +17,7 @@ jobs:
   sbom:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # sbom-action attaches each file to the run as an artifact itself,
       # so there is no separate upload step.
       - name: Generate CycloneDX SBOM
