@@ -58,7 +58,7 @@ jobs:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
           cache: ${{ needs.detect.outputs.build-tool }}
-      - uses: nikitasavinov/checkstyle-action@79490c0fdcc3ab5dd2b50a0e82a5bfc4fe63f0a9 # 0.6.0
+      - uses: nikitasavinov/checkstyle-action@abc337fbc4a4f95ccc95e138a16f65b1899796ed # 1.0.0
         with:
           reporter: github-pr-review
           level: warning
