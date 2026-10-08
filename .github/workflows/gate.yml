@@ -699,7 +699,7 @@ jobs:
         continue-on-error: true
       - name: Typo check
         if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
-        uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
+        uses: crate-ci/typos@00f422f3b19c57bc6338715ebfe3316d38768461 # v1.50.3
         continue-on-error: true
 
   code-scan:
@@ -925,7 +925,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with: { persist-credentials: false }
-      - uses: ossf/scorecard-action@v2.4.3
+      - uses: ossf/scorecard-action@v2.4.4
         with:
           results_file: scorecard-results.sarif
           results_format: sarif
@@ -974,12 +974,12 @@ jobs:
         with:
           name: built-artifact
           path: dist/
-      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: ./
           format: cyclonedx-json
           output-file: sbom.cdx.json
-      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: ./
           format: spdx-json
