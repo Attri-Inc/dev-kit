@@ -39,7 +39,7 @@ jobs:
     outputs:
       build-tool: ${{ steps.d.outputs.bt }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: d
         run: |
           if [ -f pom.xml ]; then echo "bt=maven" >> "$GITHUB_OUTPUT"
@@ -52,7 +52,7 @@ jobs:
     needs: detect
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -70,7 +70,7 @@ jobs:
     needs: detect
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -89,7 +89,7 @@ jobs:
     needs: detect
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -117,7 +117,7 @@ jobs:
     runs-on: ${{ inputs.runner }}
     steps:
       # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: actions/setup-java@v4

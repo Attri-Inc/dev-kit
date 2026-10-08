@@ -20,7 +20,7 @@ jobs:
     name: ShellCheck
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ludeeus/action-shellcheck@2.0.0
         with:
           severity: warning
@@ -29,7 +29,7 @@ jobs:
     name: shfmt (format check)
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install shfmt
         # Old URL hardcoded `shfmt_v3.8.0_linux_amd64` against `latest/download/`
         # — that 404s because v3.8.0 isn't in the latest release. Resolve the
