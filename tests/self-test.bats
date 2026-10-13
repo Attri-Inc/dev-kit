@@ -552,6 +552,33 @@ TOML
   rm -f "$base" "$head"
 }
 
+@test "actions/import-existence passes a PR whose pyproject.toml only removes deps" {
+  # grep -v exits 1 on empty input; under pipefail that once killed the scan
+  # with a bare exit 1 whenever a pyproject.toml change added no dependency.
+  python3 -c 'import tomllib, yaml' 2>/dev/null || skip "python3 >= 3.11 with PyYAML needed"
+  action_dir="$ROOT/.github/actions/import-existence"
+  script="$(mktemp)"
+  python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["runs"]["steps"][0]["run"])' \
+    "$action_dir/action.yml" > "$script"
+  work="$(mktemp -d)"
+  git init -q --bare "$work/origin.git"
+  git -C "$work" init -q -b main repo
+  cd "$work/repo"
+  git remote add origin "$work/origin.git"
+  printf '[project]\ndependencies = ["requests>=2"]\n[dependency-groups]\ndev = ["pytest==9.1.1"]\n' > pyproject.toml
+  git add pyproject.toml
+  git -c user.email=t@example.com -c user.name=t commit -q -m base
+  git push -q origin main
+  printf '[project]\ndependencies = ["requests>=2"]\n' > pyproject.toml
+  git -c user.email=t@example.com -c user.name=t commit -q -am "drop pytest"
+  BASE=main FAIL_ON=high GITHUB_ACTION_PATH="$action_dir" GITHUB_STEP_SUMMARY="$work/summary" \
+    run bash "$script"
+  cd "$ROOT"
+  rm -rf "$work" "$script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"All new dependencies exist"* ]]
+}
+
 @test "actions/exception-swallow covers all 5 languages" {
   [ -f "$ROOT/.github/actions/exception-swallow/action.yml" ]
   for lang in python js/ts java/cs go any; do
