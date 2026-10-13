@@ -287,7 +287,7 @@ XML
 
 @test "cost A4: artifact-retention-days input + retention-days on the 3 gate uploads" {
   grep -q 'artifact-retention-days:' "$ROOT/.github/workflows/gate.yml"
-  [ "$(grep -c 'retention-days: ${{ inputs.artifact-retention-days }}' "$ROOT/.github/workflows/gate.yml")" -eq 3 ]
+  [ "$(grep -cF "retention-days: \${{ fromJSON(needs.detect.outputs.settings)['artifact-retention-days'] }}" "$ROOT/.github/workflows/gate.yml")" -eq 3 ]
 }
 
 @test "scripts are all executable" {
@@ -619,7 +619,7 @@ TOML
   # java/csharp have no test-os matrix, so gate.yml must NOT pass them test-os
   ! grep -q 'test-os' "$ROOT/.github/workflows/_java.yml"
   ! grep -q 'test-os' "$ROOT/.github/workflows/_csharp.yml"
-  [ "$(grep -cF 'test-os: ${{ inputs.test-os }}' "$ROOT/.github/workflows/gate.yml")" -eq 3 ]
+  [ "$(grep -cF "test-os: \${{ fromJSON(needs.detect.outputs.settings)['test-os'] }}" "$ROOT/.github/workflows/gate.yml")" -eq 3 ]
 }
 
 @test "pr-size-guard applies per-language density weighting (default on)" {
@@ -756,4 +756,100 @@ TOML
   git log --format='%ae' | grep -qx 'noreply@anthropic.com'
   # Most recent commit should have the trailer
   git log -1 --format='%B' | grep -qF 'Co-Authored-By: Claude'
+}
+
+# ─── devkit.ini per-repo config (repo-config action) ─────────────────
+# `! cmd` does not fail a bats test under set -e, so negatives use if/then false.
+
+checks_list() {
+  grep -vE '^\s*(#|$)' "$ROOT/.github/actions/repo-config/checks.txt" | awk -F'|' '{gsub(/ /,"",$1); print $1}'
+}
+skippable_list() {  # protected checks have no guard by design
+  grep -vE '^\s*(#|$)' "$ROOT/.github/actions/repo-config/checks.txt" | awk -F'|' '{gsub(/ /,"",$1); gsub(/ /,"",$2); if ($2 != "yes") print $1}'
+}
+
+@test "repo-config action exists, is composite, ships parser + rules + checks list" {
+  D="$ROOT/.github/actions/repo-config"
+  [ -f "$D/action.yml" ]
+  grep -q "using: 'composite'" "$D/action.yml"
+  [ -x "$D/parse.sh" ]
+  [ -f "$D/resolve.jq" ]
+  [ -f "$D/checks.txt" ]
+  # On PRs the base-branch copy is read, never the PR head.
+  grep -q 'git show "origin/$BASE:$FILE"' "$D/action.yml"
+}
+
+@test "gate.yml runs repo-config in detect, before tier/stack detection, and fails gate-passed on refused entries" {
+  G="$ROOT/.github/workflows/gate.yml"
+  grep -q 'uses: Attri-Inc/dev-kit/.github/actions/repo-config@' "$G"
+  grep -q 'inputs-json: ${{ toJSON(inputs) }}' "$G"
+  cfg=$(grep -n 'id: config$' "$G" | head -1 | cut -d: -f1)
+  tier=$(grep -n 'id: tier$' "$G" | head -1 | cut -d: -f1)
+  [ "$cfg" -lt "$tier" ]
+  grep -q "INPUT_TIER: \${{ fromJSON(steps.config.outputs.settings)\['tier'\] }}" "$G"
+  grep -q 'CONFIG_ERRORS: ${{ needs.detect.outputs.config-errors }}' "$G"
+  grep -q 'skips:$skips' "$G"   # evidence artifact records the skips
+}
+
+@test "devkit.ini [kit] enabled = false no-ops the kit like .attri-dev-kit-skip" {
+  grep -q 'CFG_ENABLED: ${{ steps.config.outputs.enabled }}' "$ROOT/.github/workflows/gate.yml"
+  grep -q '"$CFG_ENABLED" = "false"' "$ROOT/.github/workflows/gate.yml"
+}
+
+@test "every skippable check in checks.txt is guarded by a contains(..., ',name,') test in a workflow" {
+  missing=""
+  while IFS= read -r name; do
+    if ! grep -rqF "',${name},'" "$ROOT/.github/workflows/"; then missing="$missing $name"; fi
+  done < <(skippable_list)
+  [ -z "$missing" ] || { echo "unguarded:$missing"; false; }
+}
+
+@test "protected checks have no skip guard, are marked in checks.txt, and are documented" {
+  for n in secrets-scan hygiene.identity code-scan.trojan-source dep-scan.malicious-deps; do
+    if grep -rqF "',${n},'" "$ROOT/.github/workflows/"; then echo "$n is skippable"; false; fi
+    grep -qE "^${n//./\\.}[[:space:]]*\|[[:space:]]*yes" "$ROOT/.github/actions/repo-config/checks.txt"
+    grep -qF "\`${n}\`" "$ROOT/docs/config-file.md"
+  done
+}
+
+@test "docs/config-file.md lists every check name from checks.txt" {
+  missing=""
+  while IFS= read -r name; do
+    if ! grep -qF "| \`${name}\` |" "$ROOT/docs/config-file.md"; then missing="$missing $name"; fi
+  done < <(checks_list)
+  [ -z "$missing" ] || { echo "undocumented:$missing"; false; }
+}
+
+@test "every sub-workflow declares the skip input and the gate passes it to each" {
+  G="$ROOT/.github/workflows/gate.yml"
+  for f in "$ROOT"/.github/workflows/_*.yml; do
+    grep -q '^      skip:$' "$f"
+  done
+  n=$(grep -c 'uses: ./.github/workflows/_' "$G")
+  m=$(grep -c 'skip: ${{ needs.detect.outputs.skip }}' "$G")
+  [ "$n" -eq "$m" ]
+}
+
+@test "locked settings stay on inputs.* in the gate and are listed in the parser" {
+  G="$ROOT/.github/workflows/gate.yml"
+  for k in runner allowed-author-domains identity-enforcement secret-scan-historic-mode attestation-frequency; do
+    if grep -q "settings)\['${k}'\]" "$G"; then echo "$k read from file"; false; fi
+    grep -q "\"${k}\"" "$ROOT/.github/actions/repo-config/parse.sh"
+    grep -qF "\`${k}\`" "$ROOT/docs/config-file.md"
+  done
+  # ...and the overridable ones are read through the resolved settings, not raw inputs.
+  for k in fail-on python-version diff-coverage-min test-os artifact-retention-days; do
+    grep -q "settings)\['${k}'\]" "$G"
+  done
+}
+
+@test "repo-config parser unit tests pass" {
+  run bash "$ROOT/tests/test-repo-config.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "kit dogfoods a devkit.ini and ships an annotated example" {
+  grep -q '^\[kit\]' "$ROOT/devkit.ini"
+  grep -q '^\[skip\]' "$ROOT/examples/devkit.ini"
+  grep -q '^\[settings\]' "$ROOT/examples/devkit.ini"
 }

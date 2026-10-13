@@ -135,6 +135,7 @@ Auto-detected via file presence. Override with `languages: python,terraform` etc
 - [Tier specification](docs/tier-spec.md) — exactly what runs where, why
 - [Language support](docs/languages.md) — per-stack details
 - [Allowlist format](docs/allowlist.md) — silencing reviewed false positives
+- [Per-repo configuration](docs/config-file.md) — `devkit.ini`: skip checks or change settings for one repo
 - [Upgrading the kit](docs/upgrading.md) — version migration
 - [Tooling rationale](docs/tooling-rationale.md) — why Sonar / Codacy / etc. are NOT in the kit
 - [Kit scope](docs/scope.md) — what's in (CI), what's out (infra, monitoring, on-call)
@@ -177,6 +178,21 @@ The kit tracks `main`. Consumers reference `gate.yml@main`.
 ## Escape hatch
 
 Drop a `.attri-dev-kit-skip` file in your repo root with a one-line reason. The kit no-ops with a notice. Useful for empty/legacy repos.
+
+## Per-repo configuration (`devkit.ini`)
+
+Drop a `devkit.ini` at the repo root to turn individual checks off or change gate settings for that repo, without editing the workflow file:
+
+```ini
+[skip]
+python.type-check = mypy breaks on generated protobuf stubs, tracked in ENG-123
+
+[settings]
+python-version = 3.12
+pr-size-soft-limit = 600
+```
+
+Skips need a reason, show up in the run summary and the compliance-evidence artifact, and can never cover the secret scan, committer identity, Trojan Source or malicious-dependency checks. On pull requests the base-branch copy applies, so a PR cannot weaken its own gate. Full reference, including every check name: [docs/config-file.md](docs/config-file.md). Annotated template: [`examples/devkit.ini`](examples/devkit.ini).
 
 ## Contributing
 

@@ -32,6 +32,11 @@ on:
         type: string
         description: 'PR label that bypasses the test-delta gate when applied.'
         default: 'tests-not-needed'
+      skip:
+        description: 'Comma-padded list of checks to skip, resolved by the gate from devkit.ini. Internal: set by gate.yml.'
+        type: string
+        required: false
+        default: ','
 
 permissions:
   contents: read
@@ -41,6 +46,7 @@ permissions:
 jobs:
   agent-rule-scan:
     name: Agent rule-file scanner
+    if: ${{ !contains(inputs.skip, ',ai-verification.agent-rule-scan,') }}
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -67,7 +73,7 @@ jobs:
 
   import-existence:
     name: Import existence (slopsquat defense)
-    if: inputs.run-medium == 'true'
+    if: inputs.run-medium == 'true' && !contains(inputs.skip, ',ai-verification.import-existence,')
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -78,6 +84,7 @@ jobs:
 
   exception-swallow:
     name: Exception-swallow + auth-bypass detector
+    if: ${{ !contains(inputs.skip, ',ai-verification.exception-swallow,') }}
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -88,7 +95,7 @@ jobs:
 
   test-delta:
     name: Test delta gate
-    if: inputs.run-medium == 'true'
+    if: inputs.run-medium == 'true' && !contains(inputs.skip, ',ai-verification.test-delta,')
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -102,6 +109,7 @@ jobs:
 
   lint-disable:
     name: Lint-disable detector
+    if: ${{ !contains(inputs.skip, ',ai-verification.lint-disable,') }}
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -112,7 +120,7 @@ jobs:
 
   claude-security-review:
     name: Anthropic claude-code-security-review (diff-only)
-    if: inputs.tier == 'main'
+    if: inputs.tier == 'main' && !contains(inputs.skip, ',ai-verification.claude-security-review,')
     runs-on: ${{ inputs.runner }}
     steps:
       - name: Skip if ANTHROPIC_API_KEY not set

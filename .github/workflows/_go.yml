@@ -34,6 +34,11 @@ on:
         description: 'JSON array of runner OSes for the test matrix. Default ["ubuntu-latest"].'
         type: string
         default: '["ubuntu-latest"]'
+      skip:
+        description: 'Comma-padded list of checks to skip, resolved by the gate from devkit.ini. Internal: set by gate.yml.'
+        type: string
+        required: false
+        default: ','
 
 permissions:
   contents: read
@@ -61,20 +66,20 @@ jobs:
           go-version: ${{ inputs.go-version }}
 
       - name: Cache golangci-lint
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !contains(inputs.skip, ',go.lint,')
         uses: actions/cache@v5
         with:
           path: ~/.cache/golangci-lint
           key: golangci-${{ runner.os }}-${{ hashFiles('**/.golangci.yml', '**/.golangci.yaml') }}
 
       - name: golangci-lint
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !contains(inputs.skip, ',go.lint,')
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
       - name: govulncheck
-        if: inputs.run-medium == 'true' && runner.os == 'Linux'
+        if: inputs.run-medium == 'true' && runner.os == 'Linux' && !contains(inputs.skip, ',go.vulncheck,')
         uses: golang/govulncheck-action@v1
         with:
           go-version-input: ${{ inputs.go-version }}
@@ -86,9 +91,11 @@ jobs:
         run: go mod verify
 
       - name: Build
+        if: ${{ !contains(inputs.skip, ',go.build,') }}
         run: go build ./...
 
       - name: Test
+        if: ${{ !contains(inputs.skip, ',go.test,') }}
         shell: bash
         run: |
           # -race needs a C toolchain (finicky on Windows); run it + coverage on
@@ -114,7 +121,7 @@ jobs:
           python-version: '3.12'
       # Patch-coverage gate (Go profile → Cobertura, module prefix stripped). Warn-first.
       - name: Diff coverage gate
-        if: hashFiles('coverage.out') != ''
+        if: hashFiles('coverage.out') != '' && !contains(inputs.skip, ',go.diff-coverage,')
         uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
         with:
           report: coverage.out

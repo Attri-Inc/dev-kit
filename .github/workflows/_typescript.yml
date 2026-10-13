@@ -38,6 +38,11 @@ on:
         description: 'JSON array of runner OSes for the test matrix. Default ["ubuntu-latest"].'
         type: string
         default: '["ubuntu-latest"]'
+      skip:
+        description: 'Comma-padded list of checks to skip, resolved by the gate from devkit.ini. Internal: set by gate.yml.'
+        type: string
+        required: false
+        default: ','
 
 permissions:
   contents: read
@@ -82,7 +87,7 @@ jobs:
 
   lint-biome:
     name: Lint + format (Biome)
-    if: needs.detect-tooling.outputs.use-biome == 'true'
+    if: needs.detect-tooling.outputs.use-biome == 'true' && !contains(inputs.skip, ',typescript.lint,')
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
@@ -92,7 +97,7 @@ jobs:
 
   lint-eslint:
     name: Lint (ESLint)
-    if: needs.detect-tooling.outputs.use-biome != 'true'
+    if: needs.detect-tooling.outputs.use-biome != 'true' && !contains(inputs.skip, ',typescript.lint,')
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
@@ -155,7 +160,7 @@ jobs:
 
   type-check:
     name: Type check (tsc)
-    if: needs.detect-tooling.outputs.has-tsconfig == 'true'
+    if: needs.detect-tooling.outputs.has-tsconfig == 'true' && !contains(inputs.skip, ',typescript.type-check,')
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
@@ -189,7 +194,7 @@ jobs:
 
   security:
     name: Security (Semgrep CLI)
-    if: inputs.run-medium == 'true'
+    if: inputs.run-medium == 'true' && !contains(inputs.skip, ',typescript.security,')
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     # Semgrep is a plain Python package, so it is installed rather than run via
@@ -241,7 +246,7 @@ jobs:
 
   deps-vulns:
     name: Dependency vulns (npm audit + osv)
-    if: inputs.run-medium == 'true'
+    if: inputs.run-medium == 'true' && !contains(inputs.skip, ',typescript.deps-vulns,')
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
@@ -276,7 +281,7 @@ jobs:
 
   test:
     name: Test
-    if: needs.detect-tooling.outputs.has-tests == 'true'
+    if: needs.detect-tooling.outputs.has-tests == 'true' && !contains(inputs.skip, ',typescript.test,')
     needs: detect-tooling
     # Cross-OS opt-in (default ubuntu = unchanged); add macos/windows for
     # portability-sensitive packages. fail-fast off. (cross-OS P1)
@@ -342,7 +347,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Diff coverage gate
-        if: steps.cov.outputs.report != ''
+        if: steps.cov.outputs.report != '' && !contains(inputs.skip, ',typescript.diff-coverage,')
         uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
         with:
           report: ${{ steps.cov.outputs.report }}
@@ -353,7 +358,7 @@ jobs:
 
   build:
     name: Build
-    if: needs.detect-tooling.outputs.has-build == 'true' && inputs.run-medium == 'true'
+    if: needs.detect-tooling.outputs.has-build == 'true' && inputs.run-medium == 'true' && !contains(inputs.skip, ',typescript.build,')
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
@@ -381,7 +386,7 @@ jobs:
     name: Frontend quality (a11y + perf budgets)
     # Frontend repos only, qa/main tier. Consume-if-present: the action no-ops
     # unless a lighthouserc / size-limit / bundlewatch config exists. (SSoT: a11y + perf P0)
-    if: needs.detect-tooling.outputs.has-build == 'true' && inputs.run-medium == 'true'
+    if: needs.detect-tooling.outputs.has-build == 'true' && inputs.run-medium == 'true' && !contains(inputs.skip, ',typescript.frontend-quality,')
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:

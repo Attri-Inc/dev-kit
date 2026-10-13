@@ -1,0 +1,141 @@
+name: 'Repo config (devkit.ini)'
+description: >-
+  Reads the consumer repo's devkit.ini and resolves its [skip] and [settings]
+  sections against the gate's inputs. On pull requests the base-branch copy
+  applies, so a PR cannot weaken its own gate. Protected checks and
+  organisation-locked settings are refused. See docs/config-file.md.
+author: 'Attri Inc'
+
+inputs:
+  inputs-json:
+    description: 'toJSON(inputs) of the calling gate: the effective inputs the file is merged over.'
+    required: true
+  event:
+    description: 'github.event_name'
+    required: true
+  base-ref:
+    description: 'github.base_ref (pull_request events only)'
+    required: false
+    default: ''
+  file:
+    description: 'Config file name at the repo root.'
+    required: false
+    default: 'devkit.ini'
+
+outputs:
+  found:
+    description: "'true' when a config file was read"
+    value: ${{ steps.parse.outputs.found }}
+  enabled:
+    description: "'false' when the file sets [kit] enabled = false"
+    value: ${{ steps.parse.outputs.enabled }}
+  reason:
+    description: 'The [kit] reason, if any'
+    value: ${{ steps.parse.outputs.reason }}
+  skip:
+    description: "Comma-padded list of skipped checks, e.g. ',python.lint,hygiene.typos,' (',' when none). Test with contains(x, ',name,')."
+    value: ${{ steps.parse.outputs.skip }}
+  skips-json:
+    description: 'JSON object of skipped check -> reason'
+    value: ${{ steps.parse.outputs.skips-json }}
+  settings:
+    description: 'JSON object of the effective gate inputs after the [settings] overrides'
+    value: ${{ steps.parse.outputs.settings }}
+  overridden:
+    description: 'JSON object of the inputs the file changed'
+    value: ${{ steps.parse.outputs.overridden }}
+  errors:
+    description: 'Number of refused entries (protected skip, locked setting). gate-passed fails when non-zero.'
+    value: ${{ steps.parse.outputs.errors }}
+  warnings:
+    description: 'Number of ignored entries (unknown key, bad value, missing reason)'
+    value: ${{ steps.parse.outputs.warnings }}
+  pending-change:
+    description: "'true' on a PR that changes the file (the base-branch copy was used)"
+    value: ${{ steps.locate.outputs.pending }}
+  source:
+    description: 'Where the file was read from, for logs'
+    value: ${{ steps.locate.outputs.source }}
+
+runs:
+  using: 'composite'
+  steps:
+    # Pick the copy of the file that applies. On a PR that is the base branch:
+    # the gate must not be weakened by the change it is gating. Elsewhere it is
+    # the checked-out ref.
+    - id: locate
+      shell: bash
+      env:
+        EVENT: ${{ inputs.event }}
+        BASE: ${{ inputs.base-ref }}
+        FILE: ${{ inputs.file }}
+      run: |
+        set -uo pipefail
+        CFG=""; SRC=""; PENDING=false
+        if [ "$EVENT" = "pull_request" ] && [ -n "$BASE" ]; then
+          # The gate's checkout is full-depth. A --depth fetch on a full clone
+          # marks the base tip shallow and hides the merge base from the
+          # three-dot diff below, so only shallow-fetch when already shallow.
+          # Explicit refspec: a single-branch clone's default refspec would not
+          # create origin/<base>.
+          REFSPEC="+refs/heads/$BASE:refs/remotes/origin/$BASE"
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+            git fetch origin "$REFSPEC" --depth=1 >/dev/null 2>&1 || true
+          else
+            git fetch origin "$REFSPEC" >/dev/null 2>&1 || true
+          fi
+          if git rev-parse --verify -q "origin/$BASE" >/dev/null 2>&1; then
+            if git cat-file -e "origin/$BASE:$FILE" 2>/dev/null; then
+              CFG="$RUNNER_TEMP/devkit-base.ini"
+              git show "origin/$BASE:$FILE" > "$CFG"
+              SRC="the base branch '$BASE'"
+            else
+              SRC="the base branch '$BASE' (no $FILE there yet)"
+            fi
+            # Did the PR change the file? Three-dot (merge-base..HEAD) when the
+            # history allows it. Otherwise compare the base tip with HEAD: on a
+            # pull_request checkout HEAD is the merge commit, so a file the PR
+            # did not touch is identical on both sides.
+            RANGE=("origin/$BASE...HEAD")
+            git diff --quiet "${RANGE[@]}" -- "$FILE" 2>/dev/null; rc=$?
+            if [ "$rc" -gt 1 ]; then
+              RANGE=("origin/$BASE" "HEAD")
+              git diff --quiet "${RANGE[@]}" -- "$FILE" 2>/dev/null; rc=$?
+            fi
+            if [ "$rc" -eq 1 ]; then
+              PENDING=true
+              echo "::notice file=$FILE::This PR changes $FILE. The base-branch copy applies to this run; the new copy takes effect after merge."
+              {
+                echo "## devkit.ini change pending"
+                echo "This PR changes \`$FILE\`. The base-branch copy applies to this run; the new copy takes effect after merge."
+                echo
+                echo '```diff'
+                git diff "${RANGE[@]}" -- "$FILE" | head -200
+                echo '```'
+                echo
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            # Cannot see the base: use the defaults rather than trust the PR head.
+            SRC="defaults (base branch '$BASE' could not be fetched)"
+          fi
+        else
+          if [ -f "$FILE" ]; then CFG="$FILE"; fi
+          SRC="ref '${GITHUB_REF_NAME:-$GITHUB_REF}'"
+        fi
+        if [ -n "$CFG" ]; then
+          echo "::notice::devkit.ini: read from $SRC."
+        fi
+        {
+          echo "config=$CFG"
+          echo "source=$SRC"
+          echo "pending=$PENDING"
+        } >> "$GITHUB_OUTPUT"
+    - id: parse
+      shell: bash
+      env:
+        CONFIG_FILE: ${{ steps.locate.outputs.config }}
+        CONFIG_SOURCE: ${{ steps.locate.outputs.source }}
+        CONFIG_PENDING: ${{ steps.locate.outputs.pending }}
+        INPUTS_JSON: ${{ inputs.inputs-json }}
+      run: bash "$GITHUB_ACTION_PATH/parse.sh"

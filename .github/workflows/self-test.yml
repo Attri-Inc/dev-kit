@@ -51,3 +51,11 @@ jobs:
       - uses: actions/checkout@v6
       - name: Run unit tests
         run: ./tests/test-lint-disable.sh
+
+  test-repo-config:
+    name: Test repo-config (devkit.ini) parser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run unit tests
+        run: ./tests/test-repo-config.sh

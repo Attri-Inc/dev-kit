@@ -1,0 +1,16 @@
+{
+  "runner": "ubuntu-latest",
+  "allowed-author-domains": "",
+  "tier": "auto",
+  "languages": "auto",
+  "fail-on": "high",
+  "identity-enforcement": "warn",
+  "pr-size-soft-limit": 400,
+  "pr-size-hard-limit": 600,
+  "run-supply-chain": false,
+  "python-version": "3.11",
+  "python-test-command": "",
+  "diff-coverage-min": "80",
+  "license-enforcement": "warn",
+  "commit-msg-fail-level": "warning"
+}

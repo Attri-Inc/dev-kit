@@ -76,6 +76,11 @@ on:
           skip:  never run pre-commit even if a config exists.
         type: string
         default: 'auto'
+      skip:
+        description: 'Comma-padded list of checks to skip, resolved by the gate from devkit.ini. Internal: set by gate.yml.'
+        type: string
+        required: false
+        default: ','
 
 permissions:
   contents: read
@@ -150,7 +155,7 @@ jobs:
   pre-commit:
     name: Pre-commit (repo hooks)
     needs: detect-tooling
-    if: needs.detect-tooling.outputs.run-pre-commit == 'true'
+    if: needs.detect-tooling.outputs.run-pre-commit == 'true' && !contains(inputs.skip, ',python.pre-commit,')
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -177,7 +182,7 @@ jobs:
     # Skip when pre-commit owns formatting/linting via the repo's own
     # config. Avoids running ruff with kit defaults that conflict with
     # the repo's pinned formatter/linter versions.
-    if: needs.detect-tooling.outputs.run-pre-commit != 'true'
+    if: needs.detect-tooling.outputs.run-pre-commit != 'true' && !contains(inputs.skip, ',python.lint,')
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
@@ -229,7 +234,7 @@ jobs:
     name: Type check (mypy)
     # Skip when the repo's pre-commit runs mypy (most do), or when the
     # caller explicitly bypasses mypy via the skip-mypy input.
-    if: needs.detect-tooling.outputs.run-pre-commit != 'true' && inputs.skip-mypy != 'true'
+    if: needs.detect-tooling.outputs.run-pre-commit != 'true' && inputs.skip-mypy != 'true' && !contains(inputs.skip, ',python.type-check,')
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
@@ -271,7 +276,7 @@ jobs:
     # Skip when the repo's pre-commit runs bandit (many repos
     # do). Note: security still runs at qa/main tier even when
     # pre-commit is present, to ensure SARIF is uploaded for tracking.
-    if: inputs.run-medium == 'true' && (needs.detect-tooling.outputs.run-pre-commit != 'true' || inputs.tier == 'main')
+    if: inputs.run-medium == 'true' && (needs.detect-tooling.outputs.run-pre-commit != 'true' || inputs.tier == 'main') && !contains(inputs.skip, ',python.security,')
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
@@ -295,7 +300,7 @@ jobs:
 
   deps-vulns:
     name: Dependency vulns (pip-audit)
-    if: inputs.run-medium == 'true'
+    if: inputs.run-medium == 'true' && !contains(inputs.skip, ',python.deps-vulns,')
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
@@ -423,7 +428,7 @@ jobs:
 
   test:
     name: Test (pytest)
-    if: needs.detect-tooling.outputs.tests-found == 'true'
+    if: needs.detect-tooling.outputs.tests-found == 'true' && !contains(inputs.skip, ',python.test,')
     needs: detect-tooling
     # Cross-OS opt-in: default matrix is just ubuntu (unchanged); consumers can
     # add macos/windows for portability-sensitive code. fail-fast off so one OS
@@ -493,7 +498,7 @@ jobs:
       # Patch-coverage gate: of the lines this PR changed, how many are tested?
       # Self-contained (diff-cover), warn-first by default. (SSoT catalog: Testing P0)
       - name: Diff coverage gate
-        if: hashFiles('coverage.xml') != '' && runner.os == 'Linux'
+        if: hashFiles('coverage.xml') != '' && runner.os == 'Linux' && !contains(inputs.skip, ',python.diff-coverage,')
         uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
         with:
           report: coverage.xml

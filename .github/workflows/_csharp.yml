@@ -24,6 +24,11 @@ on:
         description: 'warn (advisory, default) | fail (block PRs below diff-coverage-min).'
         type: string
         default: 'warn'
+      skip:
+        description: 'Comma-padded list of checks to skip, resolved by the gate from devkit.ini. Internal: set by gate.yml.'
+        type: string
+        required: false
+        default: ','
 
 permissions:
   contents: read
@@ -36,7 +41,7 @@ jobs:
     # C#/.NET SAST — mirrors the TypeScript security job: non-invasive external
     # scan (no analyzer packages forced into consumer projects), SARIF to code
     # scanning. Advisory (findings surface as annotations). (SSoT catalog: C# SAST P0)
-    if: inputs.run-medium == 'true'
+    if: inputs.run-medium == 'true' && !contains(inputs.skip, ',csharp.security,')
     runs-on: ${{ inputs.runner }}
     # Installed rather than run via `container: semgrep/semgrep` — see the
     # matching note in _typescript.yml. Avoids requiring a Docker daemon.
@@ -82,6 +87,7 @@ jobs:
 
   format:
     name: dotnet format
+    if: ${{ !contains(inputs.skip, ',csharp.format,') }}
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -95,6 +101,7 @@ jobs:
 
   build-test:
     name: Build + Test
+    if: ${{ !contains(inputs.skip, ',csharp.build-test,') }}
     runs-on: ${{ inputs.runner }}
     steps:
       # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
@@ -133,7 +140,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Diff coverage gate
-        if: steps.cov.outputs.report != ''
+        if: steps.cov.outputs.report != '' && !contains(inputs.skip, ',csharp.diff-coverage,')
         uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
         with:
           report: ${{ steps.cov.outputs.report }}

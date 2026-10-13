@@ -1,0 +1,109 @@
+# Checks a repo may turn off in devkit.ini under [skip].
+# Format: name | protected | what it covers
+# "protected = yes" means the gate refuses to skip it (the kit's reason for existing).
+# This file is the single source of truth: docs/config-file.md and the bats
+# self-test are checked against it, and every name must be guarded by a
+# contains(..., ',<name>,') test in gate.yml or a sub-workflow.
+
+# ── Whole jobs in gate.yml ───────────────────────────────────────────
+actionlint            | no  | Lints the repo's own workflow files
+secrets-scan          | yes | detect-secrets + trufflehog on the diff and history
+ai-provenance         | no  | Detects AI-authored commits and labels the PR
+ai-verification       | no  | All AI-pattern checks (see ai-verification.* below)
+python                | no  | The whole Python pipeline
+typescript            | no  | The whole TypeScript/JavaScript pipeline
+java                  | no  | The whole Java pipeline
+go                    | no  | The whole Go pipeline
+terraform             | no  | The whole Terraform pipeline
+docker                | no  | The whole Docker pipeline
+shell                 | no  | The whole shell-script pipeline
+csharp                | no  | The whole C# pipeline
+scorecard             | no  | OpenSSF Scorecard (main tier, public repos)
+sbom                  | no  | SBOM generation; also disables attest, which consumes it
+attest                | no  | Sigstore attestation of the build artifact
+migration-safety      | no  | Destructive DB migration detection (main tier)
+
+# ── Hygiene job steps ────────────────────────────────────────────────
+hygiene.identity      | yes | Committer email-domain policy
+hygiene.editorconfig  | no  | editorconfig-checker
+hygiene.lf            | no  | CRLF shell-script detection
+hygiene.pr-size       | no  | PR size guard (soft/hard line limits)
+hygiene.commit-msg    | no  | Conventional-commit message lint
+hygiene.codeowners    | no  | CODEOWNERS presence/coverage
+hygiene.markdownlint  | no  | markdownlint (qa/main tiers)
+hygiene.typos         | no  | Typo check (qa/main tiers)
+
+# ── Code-scan job steps ──────────────────────────────────────────────
+code-scan.trojan-source | yes | Trojan Source + homoglyph scan
+code-scan.mcp-allowlist | no  | MCP server allowlist
+code-scan.log-hygiene   | no  | Secrets/PII in log statements
+
+# ── Dep-scan job steps ───────────────────────────────────────────────
+dep-scan.cooldown        | no  | Dependency cooldown + confusion
+dep-scan.license         | no  | License compliance
+dep-scan.vuln-prioritize | no  | KEV + EPSS vulnerability prioritisation
+dep-scan.malicious-deps  | yes | OSV malicious-package scan
+dep-scan.conftest        | no  | Policy-as-code (Conftest)
+
+# ── AI-verification sub-workflow jobs ────────────────────────────────
+ai-verification.agent-rule-scan        | no | Prompt-injection scan of agent rule files
+ai-verification.import-existence       | no | Hallucinated-dependency check
+ai-verification.exception-swallow      | no | Swallowed-exception detector
+ai-verification.test-delta             | no | Code changed without tests
+ai-verification.lint-disable           | no | Unjustified lint-disable comments
+ai-verification.claude-security-review | no | Claude security review (main tier)
+
+# ── Python sub-workflow jobs/steps ───────────────────────────────────
+python.pre-commit     | no | Repo's own pre-commit hooks
+python.lint           | no | Ruff / Black
+python.type-check     | no | mypy
+python.security       | no | Bandit
+python.deps-vulns     | no | pip-audit
+python.test           | no | pytest
+python.diff-coverage  | no | Diff-coverage gate
+
+# ── TypeScript sub-workflow jobs/steps ───────────────────────────────
+typescript.lint             | no | Biome or ESLint
+typescript.type-check       | no | tsc --noEmit
+typescript.security         | no | Semgrep
+typescript.deps-vulns       | no | npm audit
+typescript.test             | no | Test runner
+typescript.diff-coverage    | no | Diff-coverage gate
+typescript.build            | no | Production build
+typescript.frontend-quality | no | Lighthouse + bundle budgets
+
+# ── Java sub-workflow jobs/steps ─────────────────────────────────────
+java.lint           | no | Checkstyle
+java.spotbugs       | no | SpotBugs
+java.deps-vulns     | no | OWASP Dependency-Check
+java.test           | no | Test runner
+java.diff-coverage  | no | Diff-coverage gate
+
+# ── Go sub-workflow steps ────────────────────────────────────────────
+go.lint           | no | golangci-lint
+go.vulncheck      | no | govulncheck
+go.build          | no | go build
+go.test           | no | go test
+go.diff-coverage  | no | Diff-coverage gate
+
+# ── Terraform sub-workflow jobs ──────────────────────────────────────
+terraform.fmt-validate | no | terraform fmt + validate
+terraform.tflint       | no | tflint
+terraform.checkov      | no | Checkov
+terraform.plan         | no | terraform plan + PR comment
+terraform.trivy-iac    | no | Trivy IaC scan
+terraform.infracost    | no | Infracost (main tier)
+
+# ── Docker sub-workflow jobs ─────────────────────────────────────────
+docker.hadolint        | no | hadolint
+docker.build-and-scan  | no | Build + Trivy image scan + Dockle
+
+# ── Shell sub-workflow jobs ──────────────────────────────────────────
+shell.shellcheck | no | shellcheck
+shell.shfmt      | no | shfmt
+
+# ── C# sub-workflow jobs/steps ───────────────────────────────────────
+csharp.security       | no | Semgrep
+csharp.format         | no | dotnet format
+csharp.build-test     | no | Build + tests
+csharp.diff-coverage  | no | Diff-coverage gate

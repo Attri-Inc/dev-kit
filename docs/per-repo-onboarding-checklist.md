@@ -29,7 +29,10 @@ If any tier fails on a true issue, fix it. If it fails on noise, document the fa
 
 ## Optional: per-repo overrides
 
-If your repo legitimately needs different defaults (e.g., a docs-only repo with huge PRs):
+Two ways, and they combine:
+
+1. **`devkit.ini` at the repo root** (preferred for anything repo-specific): skip named checks with a reason, or set gate inputs. No workflow edit needed; the file wins over `with:`. See [config-file.md](config-file.md) and copy [`examples/devkit.ini`](../examples/devkit.ini).
+2. **`with:` in the workflow file**, for the few settings `devkit.ini` cannot change (`runner`, `allowed-author-domains`, `identity-enforcement`, `secret-scan-historic-mode`, `attestation-frequency`) or when you prefer to keep everything in one place:
 
 ```yaml
 jobs:

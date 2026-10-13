@@ -10,6 +10,11 @@ on:
       tier:
         type: string
         required: true
+      skip:
+        description: 'Comma-padded list of checks to skip, resolved by the gate from devkit.ini. Internal: set by gate.yml.'
+        type: string
+        required: false
+        default: ','
 
 permissions:
   contents: read
@@ -18,6 +23,7 @@ permissions:
 jobs:
   shellcheck:
     name: ShellCheck
+    if: ${{ !contains(inputs.skip, ',shell.shellcheck,') }}
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -27,6 +33,7 @@ jobs:
 
   shfmt:
     name: shfmt (format check)
+    if: ${{ !contains(inputs.skip, ',shell.shfmt,') }}
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6

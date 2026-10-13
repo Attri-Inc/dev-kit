@@ -26,6 +26,11 @@ on:
       plan-working-directory:
         type: string
         default: '.'
+      skip:
+        description: 'Comma-padded list of checks to skip, resolved by the gate from devkit.ini. Internal: set by gate.yml.'
+        type: string
+        required: false
+        default: ','
 
 permissions:
   contents: read
@@ -35,6 +40,7 @@ permissions:
 jobs:
   fmt-validate:
     name: fmt + validate
+    if: ${{ !contains(inputs.skip, ',terraform.fmt-validate,') }}
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -54,6 +60,7 @@ jobs:
 
   tflint:
     name: TFLint
+    if: ${{ !contains(inputs.skip, ',terraform.tflint,') }}
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -69,7 +76,7 @@ jobs:
 
   checkov:
     name: Checkov
-    if: inputs.run-medium == 'true'
+    if: inputs.run-medium == 'true' && !contains(inputs.skip, ',terraform.checkov,')
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -90,7 +97,7 @@ jobs:
 
   plan:
     name: terraform plan (remote state)
-    if: inputs.enable-plan == true
+    if: inputs.enable-plan == true && !contains(inputs.skip, ',terraform.plan,')
     runs-on: ${{ inputs.runner }}
     permissions:
       id-token: write
@@ -128,7 +135,7 @@ jobs:
 
   trivy-iac:
     name: Trivy IaC scan
-    if: inputs.run-medium == 'true'
+    if: inputs.run-medium == 'true' && !contains(inputs.skip, ',terraform.trivy-iac,')
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -180,7 +187,7 @@ jobs:
 
   infracost:
     name: Infracost (cost diff)
-    if: inputs.tier == 'main'
+    if: inputs.tier == 'main' && !contains(inputs.skip, ',terraform.infracost,')
     runs-on: ${{ inputs.runner }}
     env:
       INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}

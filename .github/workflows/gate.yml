@@ -368,6 +368,18 @@ jobs:
     outputs:
       runner: ${{ needs.preflight.outputs.runner }}
       kit-skip: ${{ steps.skip.outputs.skip }}
+      # devkit.ini (repo-config action): what the consumer repo turned off or
+      # changed. `skip` is comma-padded — test with
+      # contains(needs.detect.outputs.skip, ',name,'). `settings` is the
+      # effective input set (file over inputs); jobs read overridable inputs as
+      # fromJSON(needs.detect.outputs.settings)['key']. See docs/config-file.md.
+      skip: ${{ steps.config.outputs.skip }}
+      skips-json: ${{ steps.config.outputs.skips-json }}
+      settings: ${{ steps.config.outputs.settings }}
+      config-found: ${{ steps.config.outputs.found }}
+      config-overridden: ${{ steps.config.outputs.overridden }}
+      config-errors: ${{ steps.config.outputs.errors }}
+      config-pending: ${{ steps.config.outputs.pending-change }}
       tier: ${{ steps.tier.outputs.tier }}
       languages: ${{ steps.detect.outputs.languages }}
       has-python: ${{ steps.detect.outputs.has-python }}
@@ -386,13 +398,29 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with: { fetch-depth: 0 }
-      # ── Escape hatch: .attri-dev-kit-skip file no-ops the entire kit ──
+      # ── devkit.ini: per-repo skips + settings (docs/config-file.md) ──
+      # On pull requests the base-branch copy applies, so a PR cannot weaken
+      # its own gate. Protected checks / locked settings are refused and
+      # counted in `errors`; gate-passed fails on a non-zero count.
+      - id: config
+        uses: Attri-Inc/dev-kit/.github/actions/repo-config@main
+        with:
+          inputs-json: ${{ toJSON(inputs) }}
+          event: ${{ github.event_name }}
+          base-ref: ${{ github.base_ref }}
+      # ── Escape hatch: .attri-dev-kit-skip file, or [kit] enabled = false ──
       - id: skip
         shell: bash
+        env:
+          CFG_ENABLED: ${{ steps.config.outputs.enabled }}
+          CFG_REASON: ${{ steps.config.outputs.reason }}
         run: |
           if [ -f .attri-dev-kit-skip ]; then
             REASON=$(head -n 1 .attri-dev-kit-skip || echo "no reason given")
             echo "::notice::attri-dev-kit skipped: $REASON"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$CFG_ENABLED" = "false" ]; then
+            echo "::notice::attri-dev-kit skipped by devkit.ini ([kit] enabled = false): ${CFG_REASON:-no reason given}"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -418,11 +446,12 @@ jobs:
         if: steps.skip.outputs.skip == 'false'
         uses: Attri-Inc/dev-kit/.github/actions/detect-stack@main
         with:
-          languages: ${{ inputs.languages }}
+          languages: ${{ fromJSON(steps.config.outputs.settings)['languages'] }}
       - id: tier
         if: steps.skip.outputs.skip == 'false'
         env:
-          INPUT_TIER: ${{ inputs.tier }}
+          INPUT_TIER: ${{ fromJSON(steps.config.outputs.settings)['tier'] }}
+          INPUT_RUN_SUPPLY_CHAIN: ${{ fromJSON(steps.config.outputs.settings)['run-supply-chain'] }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
@@ -445,7 +474,7 @@ jobs:
             qa|uat|main) echo "run-medium=true" >> "$GITHUB_OUTPUT" ;;
             *) echo "run-medium=false" >> "$GITHUB_OUTPUT" ;;
           esac
-          if [ "$T" = "main" ] || [ "${{ inputs.run-supply-chain }}" = "true" ]; then
+          if [ "$T" = "main" ] || [ "${INPUT_RUN_SUPPLY_CHAIN}" = "true" ]; then
             echo "run-supply-chain=true" >> "$GITHUB_OUTPUT"
           else
             echo "run-supply-chain=false" >> "$GITHUB_OUTPUT"
@@ -495,7 +524,7 @@ jobs:
   actionlint:
     name: Lint workflows
     needs: detect
-    if: needs.detect.outputs.kit-skip == 'false'
+    if: needs.detect.outputs.kit-skip == 'false' && !contains(needs.detect.outputs.skip, ',actionlint,')
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -606,12 +635,12 @@ jobs:
       # v3.11.3 is the last v3 and matches what consumers were running before
       # the break. Adopt v4 as its own change, once .ecrc users have migrated.
       - name: Editorconfig
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !contains(needs.detect.outputs.skip, ',hygiene.editorconfig,') }}
         uses: editorconfig-checker/action-editorconfig-checker@51f63319f592f97930c73d9c46184d20bd206393 # v3.0.0
         with:
           version: v3.11.3
       - name: Shell scripts must be LF
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !contains(needs.detect.outputs.skip, ',hygiene.lf,') }}
         shell: bash
         run: |
           BAD="$(git ls-files --eol -- '*.sh' '*.bash' 2>/dev/null | grep -E '^i/(crlf|mixed)' || true)"
@@ -622,12 +651,12 @@ jobs:
             echo "::notice::No CRLF shell scripts detected."
           fi
       - name: PR size guard
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.detect.outputs.onboarding-pr != 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.detect.outputs.onboarding-pr != 'true' && !contains(needs.detect.outputs.skip, ',hygiene.pr-size,') }}
         uses: Attri-Inc/dev-kit/.github/actions/pr-size-guard@main
         with:
-          soft-limit: ${{ inputs.pr-size-soft-limit }}
-          hard-limit: ${{ inputs.pr-size-hard-limit }}
-          size-weighting: ${{ inputs.pr-size-weighting }}
+          soft-limit: ${{ fromJSON(needs.detect.outputs.settings)['pr-size-soft-limit'] }}
+          hard-limit: ${{ fromJSON(needs.detect.outputs.settings)['pr-size-hard-limit'] }}
+          size-weighting: ${{ fromJSON(needs.detect.outputs.settings)['pr-size-weighting'] }}
       # commitlint is an npm package. The wagoid action wraps it in a Docker
       # image, which needs a daemon on the runner AND fetches the commit list
       # over the GitHub API — on failure it reports "You have commit messages
@@ -636,12 +665,12 @@ jobs:
       # about what failed. `fetch-depth: 0` on this job's checkout gives us the
       # full history the range needs.
       - name: Conventional commits
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && !contains(needs.detect.outputs.skip, ',hygiene.commit-msg,') }}
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          FAIL_LEVEL: ${{ inputs.commit-msg-fail-level }}
+          FAIL_LEVEL: ${{ fromJSON(needs.detect.outputs.settings)['commit-msg-fail-level'] }}
         run: |
           set -uo pipefail
           # GitHub runs step shells with -e. Clear it so a non-zero commitlint
@@ -685,20 +714,20 @@ jobs:
           fi
           exit "$rc"
       - name: CODEOWNERS
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && !contains(needs.detect.outputs.skip, ',hygiene.codeowners,') }}
         uses: Attri-Inc/dev-kit/.github/actions/codeowners-check@main
         with:
-          enforcement: ${{ inputs.codeowners-enforcement }}
+          enforcement: ${{ fromJSON(needs.detect.outputs.settings)['codeowners-enforcement'] }}
           github-token: ${{ github.token }}
       - name: Markdown lint
-        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' && !contains(needs.detect.outputs.skip, ',hygiene.markdownlint,') }}
         uses: DavidAnson/markdownlint-cli2-action@v23
         with:
           globs: '**/*.md'
           config: .github/.markdownlint.json
         continue-on-error: true
       - name: Typo check
-        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' && !contains(needs.detect.outputs.skip, ',hygiene.typos,') }}
         uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
         continue-on-error: true
 
@@ -714,18 +743,18 @@ jobs:
         if: ${{ !cancelled() }}
         uses: Attri-Inc/dev-kit/.github/actions/trojan-source-scan@main
         with:
-          enforcement: ${{ inputs.trojan-source-enforcement }}
+          enforcement: ${{ fromJSON(needs.detect.outputs.settings)['trojan-source-enforcement'] }}
       - name: MCP server allowlist
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !contains(needs.detect.outputs.skip, ',code-scan.mcp-allowlist,') }}
         uses: Attri-Inc/dev-kit/.github/actions/mcp-allowlist@main
         with:
-          allowlist: ${{ inputs.mcp-allowlist }}
-          enforcement: ${{ inputs.mcp-allowlist-enforcement }}
+          allowlist: ${{ fromJSON(needs.detect.outputs.settings)['mcp-allowlist'] }}
+          enforcement: ${{ fromJSON(needs.detect.outputs.settings)['mcp-allowlist-enforcement'] }}
       - name: Log hygiene
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && !contains(needs.detect.outputs.skip, ',code-scan.log-hygiene,') }}
         uses: Attri-Inc/dev-kit/.github/actions/log-hygiene@main
         with:
-          enforcement: ${{ inputs.log-hygiene-enforcement }}
+          enforcement: ${{ fromJSON(needs.detect.outputs.settings)['log-hygiene-enforcement'] }}
 
   dep-scan:
     name: Dependency scans (cooldown / license / vuln / malware / policy)
@@ -737,38 +766,38 @@ jobs:
       - uses: actions/checkout@v6
         with: { fetch-depth: 0 }
       - name: Dependency cooldown + confusion
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && !contains(needs.detect.outputs.skip, ',dep-scan.cooldown,') }}
         uses: Attri-Inc/dev-kit/.github/actions/dep-supply-chain@main
         with:
-          enforcement: ${{ inputs.dep-supply-chain-enforcement }}
-          cooldown-days: ${{ inputs.dependency-cooldown-days }}
-          internal-scopes: ${{ inputs.internal-scopes }}
+          enforcement: ${{ fromJSON(needs.detect.outputs.settings)['dep-supply-chain-enforcement'] }}
+          cooldown-days: ${{ fromJSON(needs.detect.outputs.settings)['dependency-cooldown-days'] }}
+          internal-scopes: ${{ fromJSON(needs.detect.outputs.settings)['internal-scopes'] }}
       - name: License compliance
-        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' && !contains(needs.detect.outputs.skip, ',dep-scan.license,') }}
         uses: Attri-Inc/dev-kit/.github/actions/license-check@main
         with:
-          enforcement: ${{ inputs.license-enforcement }}
+          enforcement: ${{ fromJSON(needs.detect.outputs.settings)['license-enforcement'] }}
       - name: Vuln prioritization (KEV + EPSS)
-        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' && !contains(needs.detect.outputs.skip, ',dep-scan.vuln-prioritize,') }}
         uses: Attri-Inc/dev-kit/.github/actions/vuln-prioritize@main
         with:
-          enforcement: ${{ inputs.vuln-prioritize-enforcement }}
-          fail-on: ${{ inputs.vuln-prioritize-fail-on }}
+          enforcement: ${{ fromJSON(needs.detect.outputs.settings)['vuln-prioritize-enforcement'] }}
+          fail-on: ${{ fromJSON(needs.detect.outputs.settings)['vuln-prioritize-fail-on'] }}
       - name: Malicious dependency scan (OSV)
         if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
         uses: Attri-Inc/dev-kit/.github/actions/malicious-deps@main
         with:
-          enforcement: ${{ inputs.malicious-deps-enforcement }}
+          enforcement: ${{ fromJSON(needs.detect.outputs.settings)['malicious-deps-enforcement'] }}
       - name: Policy-as-code (Conftest)
-        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' && !contains(needs.detect.outputs.skip, ',dep-scan.conftest,') }}
         uses: Attri-Inc/dev-kit/.github/actions/conftest-policy@main
         with:
-          enforcement: ${{ inputs.conftest-enforcement }}
+          enforcement: ${{ fromJSON(needs.detect.outputs.settings)['conftest-enforcement'] }}
 
   ai-provenance:
     name: AI provenance + label
     needs: detect
-    if: github.event_name == 'pull_request' && needs.detect.outputs.kit-skip == 'false'
+    if: github.event_name == 'pull_request' && needs.detect.outputs.kit-skip == 'false' && !contains(needs.detect.outputs.skip, ',ai-provenance,')
     runs-on: ${{ needs.detect.outputs.runner }}
     outputs:
       ai-authored: ${{ steps.prov.outputs.ai-authored }}
@@ -781,16 +810,17 @@ jobs:
   ai-verification:
     name: AI-specific verification
     needs: [detect, ai-provenance]
-    if: needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    if: needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && !contains(needs.detect.outputs.skip, ',ai-verification,')
     uses: ./.github/workflows/_ai-verification.yml
     with:
+      skip: ${{ needs.detect.outputs.skip }}
       runner: ${{ needs.detect.outputs.runner }}
       tier: ${{ needs.detect.outputs.tier }}
       run-medium: ${{ needs.detect.outputs.run-medium }}
       ai-detected: ${{ needs.ai-provenance.outputs.ai-authored }}
-      fail-on: ${{ inputs.fail-on }}
-      skip-test-delta: ${{ inputs.skip-test-delta }}
-      test-delta-bypass-label: ${{ inputs.test-delta-bypass-label }}
+      fail-on: ${{ fromJSON(needs.detect.outputs.settings)['fail-on'] }}
+      skip-test-delta: ${{ fromJSON(needs.detect.outputs.settings)['skip-test-delta'] }}
+      test-delta-bypass-label: ${{ fromJSON(needs.detect.outputs.settings)['test-delta-bypass-label'] }}
     secrets: inherit
 
   # ──────────────────────────────────────────────────────────────────
@@ -799,107 +829,115 @@ jobs:
   python:
     name: Python
     needs: detect
-    if: needs.detect.outputs.has-python == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    if: needs.detect.outputs.has-python == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && !contains(needs.detect.outputs.skip, ',python,')
     uses: ./.github/workflows/_python.yml
     with:
+      skip: ${{ needs.detect.outputs.skip }}
       runner: ${{ needs.detect.outputs.runner }}
       tier: ${{ needs.detect.outputs.tier }}
       run-medium: ${{ needs.detect.outputs.run-medium }}
-      fail-on: ${{ inputs.fail-on }}
-      run-pre-commit: ${{ inputs.python-pre-commit }}
-      python-version: ${{ inputs.python-version }}
-      skip-mypy: ${{ inputs.python-skip-mypy }}
-      test-command: ${{ inputs.python-test-command }}
-      test-paths: ${{ inputs.python-test-paths }}
-      diff-coverage-min: ${{ inputs.diff-coverage-min }}
-      diff-coverage-enforcement: ${{ inputs.diff-coverage-enforcement }}
-      test-os: ${{ inputs.test-os }}
+      fail-on: ${{ fromJSON(needs.detect.outputs.settings)['fail-on'] }}
+      run-pre-commit: ${{ fromJSON(needs.detect.outputs.settings)['python-pre-commit'] }}
+      python-version: ${{ fromJSON(needs.detect.outputs.settings)['python-version'] }}
+      skip-mypy: ${{ fromJSON(needs.detect.outputs.settings)['python-skip-mypy'] }}
+      test-command: ${{ fromJSON(needs.detect.outputs.settings)['python-test-command'] }}
+      test-paths: ${{ fromJSON(needs.detect.outputs.settings)['python-test-paths'] }}
+      diff-coverage-min: ${{ fromJSON(needs.detect.outputs.settings)['diff-coverage-min'] }}
+      diff-coverage-enforcement: ${{ fromJSON(needs.detect.outputs.settings)['diff-coverage-enforcement'] }}
+      test-os: ${{ fromJSON(needs.detect.outputs.settings)['test-os'] }}
 
   typescript:
     name: TypeScript / JavaScript
     needs: detect
-    if: needs.detect.outputs.has-typescript == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    if: needs.detect.outputs.has-typescript == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && !contains(needs.detect.outputs.skip, ',typescript,')
     uses: ./.github/workflows/_typescript.yml
     with:
+      skip: ${{ needs.detect.outputs.skip }}
       runner: ${{ needs.detect.outputs.runner }}
       tier: ${{ needs.detect.outputs.tier }}
       run-medium: ${{ needs.detect.outputs.run-medium }}
-      fail-on: ${{ inputs.fail-on }}
+      fail-on: ${{ fromJSON(needs.detect.outputs.settings)['fail-on'] }}
       # Honor the repo's declared Node (.nvmrc / engines); fall back to 20.
       node-version: ${{ needs.detect.outputs.node-version || '20' }}
-      diff-coverage-min: ${{ inputs.diff-coverage-min }}
-      diff-coverage-enforcement: ${{ inputs.diff-coverage-enforcement }}
-      frontend-quality-enforcement: ${{ inputs.frontend-quality-enforcement }}
-      test-os: ${{ inputs.test-os }}
+      diff-coverage-min: ${{ fromJSON(needs.detect.outputs.settings)['diff-coverage-min'] }}
+      diff-coverage-enforcement: ${{ fromJSON(needs.detect.outputs.settings)['diff-coverage-enforcement'] }}
+      frontend-quality-enforcement: ${{ fromJSON(needs.detect.outputs.settings)['frontend-quality-enforcement'] }}
+      test-os: ${{ fromJSON(needs.detect.outputs.settings)['test-os'] }}
 
   java:
     name: Java
     needs: detect
-    if: needs.detect.outputs.has-java == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    if: needs.detect.outputs.has-java == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && !contains(needs.detect.outputs.skip, ',java,')
     uses: ./.github/workflows/_java.yml
     with:
+      skip: ${{ needs.detect.outputs.skip }}
       runner: ${{ needs.detect.outputs.runner }}
       tier: ${{ needs.detect.outputs.tier }}
       run-medium: ${{ needs.detect.outputs.run-medium }}
-      fail-on: ${{ inputs.fail-on }}
-      diff-coverage-min: ${{ inputs.diff-coverage-min }}
-      diff-coverage-enforcement: ${{ inputs.diff-coverage-enforcement }}
+      fail-on: ${{ fromJSON(needs.detect.outputs.settings)['fail-on'] }}
+      diff-coverage-min: ${{ fromJSON(needs.detect.outputs.settings)['diff-coverage-min'] }}
+      diff-coverage-enforcement: ${{ fromJSON(needs.detect.outputs.settings)['diff-coverage-enforcement'] }}
 
   go:
     name: Go
     needs: detect
-    if: needs.detect.outputs.has-go == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    if: needs.detect.outputs.has-go == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && !contains(needs.detect.outputs.skip, ',go,')
     uses: ./.github/workflows/_go.yml
     with:
+      skip: ${{ needs.detect.outputs.skip }}
       runner: ${{ needs.detect.outputs.runner }}
       tier: ${{ needs.detect.outputs.tier }}
       run-medium: ${{ needs.detect.outputs.run-medium }}
-      fail-on: ${{ inputs.fail-on }}
-      diff-coverage-min: ${{ inputs.diff-coverage-min }}
-      diff-coverage-enforcement: ${{ inputs.diff-coverage-enforcement }}
-      test-os: ${{ inputs.test-os }}
+      fail-on: ${{ fromJSON(needs.detect.outputs.settings)['fail-on'] }}
+      diff-coverage-min: ${{ fromJSON(needs.detect.outputs.settings)['diff-coverage-min'] }}
+      diff-coverage-enforcement: ${{ fromJSON(needs.detect.outputs.settings)['diff-coverage-enforcement'] }}
+      test-os: ${{ fromJSON(needs.detect.outputs.settings)['test-os'] }}
 
   terraform:
     name: Terraform
     needs: detect
-    if: needs.detect.outputs.has-terraform == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    if: needs.detect.outputs.has-terraform == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && !contains(needs.detect.outputs.skip, ',terraform,')
     uses: ./.github/workflows/_terraform.yml
     with:
+      skip: ${{ needs.detect.outputs.skip }}
       runner: ${{ needs.detect.outputs.runner }}
       tier: ${{ needs.detect.outputs.tier }}
       run-medium: ${{ needs.detect.outputs.run-medium }}
-      fail-on: ${{ inputs.fail-on }}
+      fail-on: ${{ fromJSON(needs.detect.outputs.settings)['fail-on'] }}
 
   docker:
     name: Docker
     needs: detect
-    if: needs.detect.outputs.has-docker == 'true' && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    if: needs.detect.outputs.has-docker == 'true' && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && !contains(needs.detect.outputs.skip, ',docker,')
     uses: ./.github/workflows/_docker.yml
     with:
+      skip: ${{ needs.detect.outputs.skip }}
       runner: ${{ needs.detect.outputs.runner }}
       tier: ${{ needs.detect.outputs.tier }}
-      fail-on: ${{ inputs.fail-on }}
+      fail-on: ${{ fromJSON(needs.detect.outputs.settings)['fail-on'] }}
 
   shell:
     name: Shell
     needs: detect
-    if: needs.detect.outputs.has-shell == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    if: needs.detect.outputs.has-shell == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && !contains(needs.detect.outputs.skip, ',shell,')
     uses: ./.github/workflows/_shell.yml
     with:
+      skip: ${{ needs.detect.outputs.skip }}
       runner: ${{ needs.detect.outputs.runner }}
       tier: ${{ needs.detect.outputs.tier }}
 
   csharp:
     name: C#
     needs: detect
-    if: needs.detect.outputs.has-csharp == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    if: needs.detect.outputs.has-csharp == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && !contains(needs.detect.outputs.skip, ',csharp,')
     uses: ./.github/workflows/_csharp.yml
     with:
+      skip: ${{ needs.detect.outputs.skip }}
       runner: ${{ needs.detect.outputs.runner }}
       tier: ${{ needs.detect.outputs.tier }}
       run-medium: ${{ needs.detect.outputs.run-medium }}
-      diff-coverage-min: ${{ inputs.diff-coverage-min }}
-      diff-coverage-enforcement: ${{ inputs.diff-coverage-enforcement }}
+      diff-coverage-min: ${{ fromJSON(needs.detect.outputs.settings)['diff-coverage-min'] }}
+      diff-coverage-enforcement: ${{ fromJSON(needs.detect.outputs.settings)['diff-coverage-enforcement'] }}
 
   # ──────────────────────────────────────────────────────────────────
   # Supply-chain jobs (main tier or explicit override only)
@@ -915,7 +953,7 @@ jobs:
     # Attestation-frequency gate: runs on every main merge when
     # `attestation-frequency: per-commit`; otherwise only on `schedule:`
     # triggers (consumer adds daily cron). Saves ~$25-35/mo of Scorecard.
-    if: ${{ needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && !github.event.repository.private && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule') }}
+    if: ${{ needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && !github.event.repository.private && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule') && !contains(needs.detect.outputs.skip, ',scorecard,') }}
     runs-on: ${{ needs.detect.outputs.runner }}
     permissions:
       security-events: write
@@ -954,19 +992,19 @@ jobs:
       - id: build
         uses: Attri-Inc/dev-kit/.github/actions/build-artifact@main
         with:
-          build-command: ${{ inputs.build-command }}
+          build-command: ${{ fromJSON(needs.detect.outputs.settings)['build-command'] }}
           languages: ${{ needs.detect.outputs.languages }}
       - uses: actions/upload-artifact@v7
         with:
           name: built-artifact
           path: ${{ steps.build.outputs.artifact-path }}
           if-no-files-found: warn
-          retention-days: ${{ inputs.artifact-retention-days }}
+          retention-days: ${{ fromJSON(needs.detect.outputs.settings)['artifact-retention-days'] }}
 
   sbom:
     name: SBOM (CycloneDX + SPDX)
     needs: [detect, build-artifact]
-    if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule')
+    if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule') && !contains(needs.detect.outputs.skip, ',sbom,')
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -990,12 +1028,12 @@ jobs:
           path: |
             sbom.cdx.json
             sbom.spdx.json
-          retention-days: ${{ inputs.artifact-retention-days }}
+          retention-days: ${{ fromJSON(needs.detect.outputs.settings)['artifact-retention-days'] }}
 
   attest:
     name: Sigstore build attestation
     needs: [detect, build-artifact, sbom]
-    if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule')
+    if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule') && !contains(needs.detect.outputs.skip, ',sbom,') && !contains(needs.detect.outputs.skip, ',attest,')
     runs-on: ${{ needs.detect.outputs.runner }}
     environment: ${{ needs.detect.outputs.tier == 'main' && 'production' || '' }}
     permissions:
@@ -1050,7 +1088,7 @@ jobs:
   migration-safety:
     name: Migration safety
     needs: detect
-    if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
+    if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && !contains(needs.detect.outputs.skip, ',migration-safety,')
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -1093,7 +1131,17 @@ jobs:
     runs-on: ${{ needs.detect.outputs.runner || 'ubuntu-latest' }}
     steps:
       - name: Verify required jobs
+        env:
+          CONFIG_ERRORS: ${{ needs.detect.outputs.config-errors }}
         run: |
+          # devkit.ini tried to skip a protected check or change a locked
+          # setting. The request was ignored and the run continued; fail here,
+          # where it is visible, rather than in detect (which would leave this
+          # job skipped with no outputs to explain why).
+          if [ -n "$CONFIG_ERRORS" ] && [ "$CONFIG_ERRORS" != "0" ]; then
+            echo "::error::devkit.ini has $CONFIG_ERRORS refused entry(ies): a protected check in [skip] or a locked key in [settings]. See the 'Detect stack' job summary and docs/config-file.md."
+            exit 1
+          fi
           status='${{ join(needs.*.result, ',') }}'
           echo "Job results: $status"
           if echo "$status" | grep -E '(failure|cancelled)' > /dev/null; then
@@ -1109,6 +1157,10 @@ jobs:
         shell: bash
         env:
           NEEDS: ${{ toJson(needs) }}
+          CFG_FOUND: ${{ needs.detect.outputs.config-found }}
+          CFG_PENDING: ${{ needs.detect.outputs.config-pending }}
+          CFG_SKIPS: ${{ needs.detect.outputs.skips-json }}
+          CFG_OVERRIDDEN: ${{ needs.detect.outputs.config-overridden }}
         run: |
           # toJson(needs) is always valid, non-empty JSON; guard for the empty
           # case WITHOUT `${NEEDS:-{}}` — bash matches the first `}` as the close
@@ -1116,16 +1168,25 @@ jobs:
           # JSON ("invalid JSON text passed to --argjson"), failing the gate.
           checks="${NEEDS:-}"
           [ -n "$checks" ] || checks='{}'
+          # The devkit.ini outputs are empty when detect did not get that far.
+          skips="${CFG_SKIPS:-}";           [ -n "$skips" ] || skips='{}'
+          overridden="${CFG_OVERRIDDEN:-}"; [ -n "$overridden" ] || overridden='{}'
           jq -n \
             --arg repo "$GITHUB_REPOSITORY" --arg sha "$GITHUB_SHA" --arg ref "$GITHUB_REF" \
             --arg run "$GITHUB_RUN_ID" --arg event "$GITHUB_EVENT_NAME" --arg actor "$GITHUB_ACTOR" \
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson checks "$checks" \
-            '{schema:"attri-dev-kit/compliance-evidence/v1",repository:$repo,commit:$sha,ref:$ref,run_id:$run,event:$event,actor:$actor,generated_at:$ts,checks:($checks|map_values(.result))}' \
+            --arg found "${CFG_FOUND:-false}" --arg pending "${CFG_PENDING:-false}" \
+            --argjson skips "$skips" --argjson overridden "$overridden" \
+            '{schema:"attri-dev-kit/compliance-evidence/v1",repository:$repo,commit:$sha,ref:$ref,run_id:$run,event:$event,actor:$actor,generated_at:$ts,checks:($checks|map_values(.result)),config:{found:($found=="true"),pending_change:($pending=="true"),skips:$skips,settings_overridden:$overridden}}' \
             > compliance-evidence.json
           {
             echo "## Compliance evidence"
             echo "Emitted \`compliance-evidence.json\` (artifact) — gate results + provenance for audit trails."
             echo "Gate→control coverage: \`docs/compliance-control-mapping.md\`."
+            n="$(jq 'length' <<<"$skips")"
+            if [ "$n" != "0" ]; then
+              echo "devkit.ini skipped $n check(s): $(jq -r 'keys | join(", ")' <<<"$skips") — reasons in the 'Detect stack' job summary."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         if: always()
@@ -1133,7 +1194,7 @@ jobs:
           name: compliance-evidence
           path: compliance-evidence.json
           if-no-files-found: warn
-          retention-days: ${{ inputs.artifact-retention-days }}
+          retention-days: ${{ fromJSON(needs.detect.outputs.settings)['artifact-retention-days'] }}
 
   # ──────────────────────────────────────────────────────────────────
   # Failure notification — posts to Google Chat when any gate job fails.

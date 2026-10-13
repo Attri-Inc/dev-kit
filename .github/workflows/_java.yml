@@ -27,6 +27,11 @@ on:
         description: 'warn (advisory, default) | fail (block PRs below diff-coverage-min).'
         type: string
         default: 'warn'
+      skip:
+        description: 'Comma-padded list of checks to skip, resolved by the gate from devkit.ini. Internal: set by gate.yml.'
+        type: string
+        required: false
+        default: ','
 
 permissions:
   contents: read
@@ -49,6 +54,7 @@ jobs:
 
   lint:
     name: Lint (Checkstyle)
+    if: ${{ !contains(inputs.skip, ',java.lint,') }}
     needs: detect
     runs-on: ${{ inputs.runner }}
     steps:
@@ -66,7 +72,7 @@ jobs:
 
   spotbugs:
     name: SpotBugs
-    if: inputs.run-medium == 'true'
+    if: inputs.run-medium == 'true' && !contains(inputs.skip, ',java.spotbugs,')
     needs: detect
     runs-on: ${{ inputs.runner }}
     steps:
@@ -85,7 +91,7 @@ jobs:
 
   deps-vulns:
     name: Dependency-Check (OWASP)
-    if: inputs.run-medium == 'true'
+    if: inputs.run-medium == 'true' && !contains(inputs.skip, ',java.deps-vulns,')
     needs: detect
     runs-on: ${{ inputs.runner }}
     steps:
@@ -113,6 +119,7 @@ jobs:
 
   test:
     name: Test
+    if: ${{ !contains(inputs.skip, ',java.test,') }}
     needs: detect
     runs-on: ${{ inputs.runner }}
     steps:
@@ -151,7 +158,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Diff coverage gate
-        if: steps.cov.outputs.report != ''
+        if: steps.cov.outputs.report != '' && !contains(inputs.skip, ',java.diff-coverage,')
         uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
         with:
           report: ${{ steps.cov.outputs.report }}

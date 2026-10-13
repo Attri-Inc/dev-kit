@@ -25,6 +25,11 @@ on:
           the cache rotates. Default false = always pull the latest DB.
         type: string
         default: 'false'
+      skip:
+        description: 'Comma-padded list of checks to skip, resolved by the gate from devkit.ini. Internal: set by gate.yml.'
+        type: string
+        required: false
+        default: ','
 
 permissions:
   contents: read
@@ -57,7 +62,7 @@ jobs:
   hadolint:
     name: hadolint ${{ matrix.dockerfile }}
     needs: discover
-    if: fromJson(needs.discover.outputs.matrix).include[0] != null
+    if: fromJson(needs.discover.outputs.matrix).include[0] != null && !contains(inputs.skip, ',docker.hadolint,')
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
@@ -107,7 +112,7 @@ jobs:
   build-and-scan:
     name: Build + Trivy + Dockle ${{ matrix.dockerfile }}
     needs: discover
-    if: fromJson(needs.discover.outputs.matrix).include[0] != null
+    if: fromJson(needs.discover.outputs.matrix).include[0] != null && !contains(inputs.skip, ',docker.build-and-scan,')
     runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
