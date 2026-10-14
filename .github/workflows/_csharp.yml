@@ -59,7 +59,7 @@ jobs:
             echo "present=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Semgrep ${WANT} not present (found: ${have:-none}) — installing."
           fi
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: steps.semgrep.outputs.present != 'true'
         with:
           python-version: '3.12'
@@ -128,7 +128,7 @@ jobs:
             echo "report=" >> "$GITHUB_OUTPUT"
             echo "::notice::No coverage.cobertura.xml found. Add the coverlet.collector package to your test project to activate the patch-coverage gate."
           fi
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: steps.cov.outputs.report != ''
         with:
           python-version: '3.12'

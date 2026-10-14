@@ -146,7 +146,7 @@ jobs:
             echo "report=" >> "$GITHUB_OUTPUT"
             echo "::notice::No JaCoCo report found. Enable the JaCoCo plugin (maven jacoco:report / gradle jacocoTestReport) to activate the patch-coverage gate."
           fi
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: steps.cov.outputs.report != ''
         with:
           python-version: '3.12'
