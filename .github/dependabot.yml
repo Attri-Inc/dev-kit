@@ -3,7 +3,10 @@
 version: 2
 updates:
   - package-ecosystem: "github-actions"
-    directory: "/"
+    # "/" covers .github/workflows only; composite actions need their own entry.
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -21,3 +24,7 @@ updates:
         update-types:
           - "patch"
           - "minor"
+      # One PR for all majors too, so a week of releases is two PRs, not ten.
+      major:
+        update-types:
+          - "major"
