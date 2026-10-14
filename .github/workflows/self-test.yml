@@ -38,7 +38,7 @@ jobs:
     name: Bats fixture tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install bats
         run: sudo apt-get update && sudo apt-get install -y bats
       - name: Run fixture tests
@@ -48,6 +48,6 @@ jobs:
     name: Test lint-disable-detector
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run unit tests
         run: ./tests/test-lint-disable.sh

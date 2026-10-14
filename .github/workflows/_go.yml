@@ -53,16 +53,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.go-version }}
 
       - name: Cache golangci-lint
         if: runner.os == 'Linux'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/golangci-lint
           key: golangci-${{ runner.os }}-${{ hashFiles('**/.golangci.yml', '**/.golangci.yaml') }}
@@ -108,7 +108,7 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       # setup-python gives a clean (non-PEP-668-locked) Python so the gate can
       # pip-install diff-cover; the Go job otherwise has no Python toolchain.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: hashFiles('coverage.out') != '' && github.event_name == 'pull_request'
         with:
           python-version: '3.12'

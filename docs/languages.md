@@ -63,7 +63,7 @@ Package manager auto-detected: pnpm (`pnpm-lock.yaml`) → yarn (`yarn.lock`) �
 | Static analysis | SpotBugs (composite) | Apache-2.0 |
 | Dep vulns | [dependency-check/Dependency-Check_Action@main](https://github.com/dependency-check/Dependency-Check_Action) | Apache-2.0 |
 | Test | mvn/gradle test (composite) | various |
-| JDK | [actions/setup-java@v4](https://github.com/actions/setup-java) (Temurin) | MIT |
+| JDK | [actions/setup-java@v6](https://github.com/actions/setup-java) (Temurin) | MIT |
 
 ## Go
 
@@ -81,7 +81,7 @@ Package manager auto-detected: pnpm (`pnpm-lock.yaml`) → yarn (`yarn.lock`) �
 
 | Tool | Action | License |
 |---|---|---|
-| fmt + validate | [hashicorp/setup-terraform@v3](https://github.com/hashicorp/setup-terraform) | MPL-2.0 |
+| fmt + validate | [hashicorp/setup-terraform@v4](https://github.com/hashicorp/setup-terraform) | MPL-2.0 |
 | Lint | [terraform-linters/setup-tflint@v6](https://github.com/terraform-linters/setup-tflint) | MPL-2.0 |
 | Security | [bridgecrewio/checkov-action@master](https://github.com/bridgecrewio/checkov-action) | Apache-2.0 |
 | Security (alt) | Trivy CLI (`trivy config`) via [aquasecurity/setup-trivy](https://github.com/aquasecurity/setup-trivy) — binary install, no Docker daemon | Apache-2.0 |
@@ -116,7 +116,7 @@ Note: tfsec is folded into Trivy. Terrascan is archived by Tenable — not used 
 | Tool | Action | License |
 |---|---|---|
 | Format | dotnet format (composite) | MIT |
-| Build + test | [actions/setup-dotnet@v4](https://github.com/actions/setup-dotnet) | MIT |
+| Build + test | [actions/setup-dotnet@v6](https://github.com/actions/setup-dotnet) | MIT |
 | Security SAST | Semgrep CLI (`p/csharp` + `p/owasp-top-ten`), pip-installed — non-invasive, SARIF to code scanning | LGPL-2.1 (tool) |
 | Coverage | coverlet (`--collect "XPlat Code Coverage"`) → diff-coverage gate | MIT |
 

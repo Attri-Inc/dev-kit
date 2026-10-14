@@ -37,8 +37,8 @@ jobs:
     name: fmt + validate
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ inputs.terraform-version }}
       - run: terraform fmt -check -recursive
@@ -56,7 +56,7 @@ jobs:
     name: TFLint
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: terraform-linters/setup-tflint@v6
       - run: tflint --init
         env:
@@ -72,8 +72,8 @@ jobs:
     if: inputs.run-medium == 'true'
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: bridgecrewio/checkov-action@fa9edf8f0a491c59a924ea6accd5bdcf07752cff # v12.3107.0
+      - uses: actions/checkout@v7
+      - uses: bridgecrewio/checkov-action@c13aafd679d3814a25067d10fcaf98c4f7594931 # v12.3131.0
         with:
           directory: .
           framework: terraform
@@ -97,13 +97,13 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ inputs.terraform-version }}
       - name: Plan
@@ -131,9 +131,9 @@ jobs:
     if: inputs.run-medium == 'true'
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Cache Trivy DB
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/trivy
           key: trivy-db-iac-${{ runner.os }}
@@ -194,7 +194,7 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: steps.gate.outputs.skip != 'true'
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -205,7 +205,7 @@ jobs:
       - name: Generate baseline cost
         if: steps.gate.outputs.skip != 'true'
         run: infracost breakdown --path=. --format=json --out-file=/tmp/infracost-base.json || true
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: steps.gate.outputs.skip != 'true'
       - name: Generate diff
         if: steps.gate.outputs.skip != 'true'

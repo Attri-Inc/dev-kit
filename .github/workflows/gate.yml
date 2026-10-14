@@ -384,7 +384,7 @@ jobs:
       run-medium: ${{ steps.tier.outputs.run-medium }}
       docs-only: ${{ steps.docsonly.outputs.docs-only }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       # ── Escape hatch: .attri-dev-kit-skip file no-ops the entire kit ──
       - id: skip
@@ -498,7 +498,7 @@ jobs:
     if: needs.detect.outputs.kit-skip == 'false'
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Skip if no workflow files changed
         id: filter
@@ -558,7 +558,7 @@ jobs:
     if: needs.detect.outputs.kit-skip == 'false'
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: ${{ needs.detect.outputs.tier == 'dev' && 1 || 0 }}
       - uses: Attri-Inc/dev-kit/.github/actions/detect-secrets@main
@@ -583,7 +583,7 @@ jobs:
     if: needs.detect.outputs.kit-skip == 'false'
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Committer identity
         if: ${{ !cancelled() }}
@@ -692,14 +692,14 @@ jobs:
           github-token: ${{ github.token }}
       - name: Markdown lint
         if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
-        uses: DavidAnson/markdownlint-cli2-action@v23
+        uses: DavidAnson/markdownlint-cli2-action@v24
         with:
           globs: '**/*.md'
           config: .github/.markdownlint.json
         continue-on-error: true
       - name: Typo check
         if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
-        uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
+        uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
         continue-on-error: true
 
   code-scan:
@@ -708,7 +708,7 @@ jobs:
     if: needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Trojan Source + homoglyph
         if: ${{ !cancelled() }}
@@ -734,7 +734,7 @@ jobs:
     if: needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && (github.event_name == 'pull_request' || needs.detect.outputs.run-medium == 'true')
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Dependency cooldown + confusion
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
@@ -773,7 +773,7 @@ jobs:
     outputs:
       ai-authored: ${{ steps.prov.outputs.ai-authored }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - id: prov
         uses: Attri-Inc/dev-kit/.github/actions/ai-provenance@main
@@ -923,9 +923,9 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { persist-credentials: false }
-      - uses: ossf/scorecard-action@v2.4.3
+      - uses: ossf/scorecard-action@v2.4.4
         with:
           results_file: scorecard-results.sarif
           results_format: sarif
@@ -949,7 +949,7 @@ jobs:
     outputs:
       artifact-path: ${{ steps.build.outputs.artifact-path }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - id: build
         uses: Attri-Inc/dev-kit/.github/actions/build-artifact@main
@@ -969,17 +969,17 @@ jobs:
     if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && (inputs.attestation-frequency == 'per-commit' || github.event_name == 'schedule')
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: built-artifact
           path: dist/
-      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: ./
           format: cyclonedx-json
           output-file: sbom.cdx.json
-      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: ./
           format: spdx-json
@@ -1053,7 +1053,7 @@ jobs:
     if: needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     runs-on: ${{ needs.detect.outputs.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - uses: Attri-Inc/dev-kit/.github/actions/migration-safety@main
 
@@ -1169,7 +1169,7 @@ jobs:
       actions: read   # read which jobs/steps failed in this run
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: Attri-Inc/dev-kit/.github/actions/notify-gchat-ci@main
         with:
           webhook_url: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}

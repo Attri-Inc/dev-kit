@@ -93,7 +93,7 @@ jobs:
       pre-commit-found: ${{ steps.d.outputs.pre_commit }}
       run-pre-commit: ${{ steps.d.outputs.run_pre_commit }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: d
         shell: bash
         env:
@@ -153,13 +153,13 @@ jobs:
     if: needs.detect-tooling.outputs.run-pre-commit == 'true'
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.python-version }}
           cache: pip
       - name: Cache pre-commit envs
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-py${{ inputs.python-version }}-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-config.yml') }}
@@ -181,12 +181,12 @@ jobs:
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.python-version }}
           cache: pip
-      - uses: astral-sh/ruff-action@v4.0.0
+      - uses: astral-sh/ruff-action@v4.1.0
         with:
           args: 'check --output-format=github'
       - name: Detect formatter
@@ -233,8 +233,8 @@ jobs:
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.python-version }}
           cache: pip
@@ -242,7 +242,7 @@ jobs:
       # when .mypy_cache/ is restored. Key on the lockfile hashes — if deps
       # change, types may shift, so cache invalidates automatically.
       - name: Cache mypy incremental
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: .mypy_cache
           key: mypy-${{ runner.os }}-py${{ inputs.python-version }}-${{ hashFiles('**/poetry.lock', '**/Pipfile.lock', '**/uv.lock', '**/pdm.lock', '**/requirements*.txt', '**/pyproject.toml') }}
@@ -275,8 +275,8 @@ jobs:
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.python-version }}
           cache: pip
@@ -299,8 +299,8 @@ jobs:
     needs: detect-tooling
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.python-version }}
           cache: pip
@@ -436,10 +436,10 @@ jobs:
     steps:
       # fetch-depth: 0 so the diff-coverage gate can find the merge-base with the
       # PR's base branch and compute coverage of only the changed lines.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.python-version }}
           cache: pip

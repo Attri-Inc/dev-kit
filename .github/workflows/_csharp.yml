@@ -41,7 +41,7 @@ jobs:
     # Installed rather than run via `container: semgrep/semgrep` — see the
     # matching note in _typescript.yml. Avoids requiring a Docker daemon.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # See the matching note in _typescript.yml: skip the install entirely when
       # the runner image already ships the pinned Semgrep.
       - name: Check for Semgrep
@@ -59,7 +59,7 @@ jobs:
             echo "present=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Semgrep ${WANT} not present (found: ${have:-none}) — installing."
           fi
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: steps.semgrep.outputs.present != 'true'
         with:
           python-version: '3.12'
@@ -84,8 +84,8 @@ jobs:
     name: dotnet format
     runs-on: ${{ inputs.runner }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ inputs.dotnet-version }}
           cache: true
@@ -98,10 +98,10 @@ jobs:
     runs-on: ${{ inputs.runner }}
     steps:
       # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ inputs.dotnet-version }}
       # --locked-mode installs strictly from packages.lock.json when present
@@ -128,7 +128,7 @@ jobs:
             echo "report=" >> "$GITHUB_OUTPUT"
             echo "::notice::No coverage.cobertura.xml found. Add the coverlet.collector package to your test project to activate the patch-coverage gate."
           fi
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: steps.cov.outputs.report != ''
         with:
           python-version: '3.12'
