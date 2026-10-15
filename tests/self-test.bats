@@ -94,6 +94,13 @@ setup() {
   done
 }
 
+@test "no example path-filters pull_request (a skipped PR never reports Gate passed)" {
+  for f in "$ROOT/examples"/*/.github/workflows/attri-dev-kit.yml; do
+    ! sed -n "/^  pull_request:/,/^  [a-z#]/p" "$f" | grep -qE "^    paths(-ignore)?:" \
+      || { echo "$f filters paths on pull_request"; false; }
+  done
+}
+
 @test "every example pins to @main (the kit's canonical reference)" {
   # Policy: the kit tracks main and has no version tags, so examples must
   # reference it as @main.
