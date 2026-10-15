@@ -15,15 +15,9 @@ on:
       - '.editorconfig'
   pull_request:
     branches: [main, master, dev, dev-*, develop, qa, uat, staging, release/*]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/CODEOWNERS'
-      - 'LICENSE'
-      - '*.txt'
-      - '.gitignore'
-      - '.editorconfig'
+    # No paths-ignore here: GitHub never reports the required "Gate passed" check
+    # for a PR that a path filter skips, so docs-only and zero-change PRs stay
+    # blocked. The gate's docs-only short-circuit already keeps docs PRs cheap.
   # Daily nightly run for attestation jobs (Scorecard + SBOM + Sigstore).
   # By default, these only run on `schedule:` triggers —
   # saves ~$80-100/mo by attesting once/day instead of per-merge. Override

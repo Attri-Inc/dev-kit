@@ -27,7 +27,7 @@ on:
     paths-ignore: ['**/*.md', 'docs/**', '.github/ISSUE_TEMPLATE/**', '.github/CODEOWNERS', 'LICENSE', '*.txt', '.gitignore', '.editorconfig']
   pull_request:
     branches: [main, master, dev, dev-*, develop, qa, uat, staging, release/*]
-    paths-ignore: ['**/*.md', 'docs/**', '.github/ISSUE_TEMPLATE/**', '.github/CODEOWNERS', 'LICENSE', '*.txt', '.gitignore', '.editorconfig']
+    # No paths-ignore on pull_request: a filtered-out PR never reports "Gate passed" and stays blocked.
   schedule:
     - cron: '17 7 * * *'   # daily nightly attestation (Scorecard + SBOM + Sigstore)
 concurrency:
@@ -54,7 +54,7 @@ jobs:
     #   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}              # claude-code-security-review
 ```
 
-The `paths-ignore`, `schedule`, and `concurrency` blocks are not optional — they reduce per-repo Actions spend by ~50% (docs PRs skip CI, nightly attestation, force-push cancellation). Pick the example matching your stack from [`examples/`](examples/) for stack-specific overrides.
+The `paths-ignore` (on `push` only), `schedule`, and `concurrency` blocks are not optional — they reduce per-repo Actions spend by ~50% (docs pushes skip CI, nightly attestation, force-push cancellation). Do not add `paths-ignore` to `pull_request`: GitHub never reports a required check for a PR that a path filter skips, so docs-only and zero-change PRs (such as a back-merge after a squash merge) stay blocked. The gate's `docs-only` short-circuit already keeps docs PRs cheap. Pick the example matching your stack from [`examples/`](examples/) for stack-specific overrides.
 
 ## What runs at each tier
 
