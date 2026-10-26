@@ -36,7 +36,7 @@ runs:
 
         # Normalize allowlist into newline tokens.
         ALLOW_TOKENS="$(printf '%s' "${ALLOW:-}" | tr ', ' '\n' | sed '/^$/d')"
-        allowed() { [ -n "$ALLOW_TOKENS" ] && printf '%s\n' "$ALLOW_TOKENS" | grep -qxiF "$1"; }
+        allowed() { [ -n "$ALLOW_TOKENS" ] && grep -qxiF "$1" <<< "$ALLOW_TOKENS"; }
 
         FOUND=(); VIOLATIONS=()
         for cfg in "${CONFIGS[@]}"; do

@@ -131,9 +131,9 @@ runs:
           PKG="${row%%$'\t'*}"; LIC="${row#*$'\t'}"
           [ "$LIC" = "?" ] && continue
           if is_allowlisted "$PKG" "$LIC"; then continue; fi
-          if printf '%s' "$LIC" | grep -qiE "$DENY_RE"; then
+          if grep -qiE "$DENY_RE" <<< "$LIC"; then
             DENIED+=( "$PKG :: $LIC" )
-          elif printf '%s' "$LIC" | grep -qiE "$WARN_RE"; then
+          elif grep -qiE "$WARN_RE" <<< "$LIC"; then
             WARNED+=( "$PKG :: $LIC" )
           fi
         done

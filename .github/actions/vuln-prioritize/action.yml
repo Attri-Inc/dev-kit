@@ -123,7 +123,7 @@ runs:
         flush_epss
 
         epss_of() { awk -F'\t' -v c="$1" '$1==c{print $2; found=1} END{if(!found)print "0"}' "$EPSS_TMP" | head -1; }
-        is_kev()  { printf '%s\n' "$KEV_SET" | grep -qxF "$1"; }
+        is_kev()  { grep -qxF "$1" <<< "$KEV_SET"; }
 
         KEV_HITS=(); HIGH_EPSS=(); REST=0
         for c in "${CVES[@]}"; do
