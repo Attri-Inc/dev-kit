@@ -408,7 +408,7 @@ jobs:
           CHANGED=$(git diff --name-only "origin/$BASE...HEAD" 2>/dev/null || true)
           if [ -z "$CHANGED" ]; then
             echo "is-onboarding=false" >> "$GITHUB_OUTPUT"
-          elif [ "$(echo "$CHANGED" | wc -l | tr -d ' ')" = "1" ] && echo "$CHANGED" | grep -q '\.github/workflows/attri-dev-kit\.yml$'; then
+          elif [ "$(echo "$CHANGED" | wc -l | tr -d ' ')" = "1" ] && grep -q '\.github/workflows/attri-dev-kit\.yml$' <<< "$CHANGED"; then
             echo "is-onboarding=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Detected kit onboarding PR — pr-size-guard will be skipped."
           else
@@ -512,7 +512,7 @@ jobs:
           else
             CHANGED=$(git diff --name-only HEAD~1...HEAD 2>/dev/null || echo "")
           fi
-          if echo "$CHANGED" | grep -qE '^\.github/(workflows|actions)/'; then
+          if grep -qE '^\.github/(workflows|actions)/' <<< "$CHANGED"; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
           else
             echo "skip=true" >> "$GITHUB_OUTPUT"

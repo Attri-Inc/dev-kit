@@ -81,11 +81,11 @@ runs:
           fi
 
           local reason=""
-          if   echo "$email" | grep -Eq "$REJECT_LOCAL";   then reason="local-machine email (.local)"
-          elif echo "$email" | grep -Eq "$REJECT_IP";      then reason="raw IP hostname"
-          elif echo "$email" | grep -Eq "$REJECT_GMAIL";   then reason="personal Gmail"
-          elif echo "$email" | grep -Eq "$REJECT_YAHOO";   then reason="personal Yahoo"
-          elif echo "$email" | grep -Eq "$REJECT_OUTLOOK"; then reason="personal Outlook/Hotmail"
+          if   grep -Eq "$REJECT_LOCAL" <<< "$email";   then reason="local-machine email (.local)"
+          elif grep -Eq "$REJECT_IP" <<< "$email";      then reason="raw IP hostname"
+          elif grep -Eq "$REJECT_GMAIL" <<< "$email";   then reason="personal Gmail"
+          elif grep -Eq "$REJECT_YAHOO" <<< "$email";   then reason="personal Yahoo"
+          elif grep -Eq "$REJECT_OUTLOOK" <<< "$email"; then reason="personal Outlook/Hotmail"
           else                                                  reason="domain not in allowlist ($domain)"
           fi
 

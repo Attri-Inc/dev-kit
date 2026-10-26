@@ -255,7 +255,7 @@ runs:
             # Not a PR (push to main, etc.) — treat all findings as new.
             IS_NEW="true"
           elif [ -n "$COMMIT" ] && [ -n "$PR_COMMITS" ]; then
-            if echo "$PR_COMMITS" | grep -qx "$COMMIT"; then
+            if grep -qx "$COMMIT" <<< "$PR_COMMITS"; then
               IS_NEW="true"
             fi
           fi

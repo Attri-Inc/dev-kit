@@ -33,10 +33,10 @@ is_ai_authored() {
   committer_email=$(git show -s --format='%ce' "$commit_sha" 2>/dev/null)
   author_email=$(git show -s --format='%ae' "$commit_sha" 2>/dev/null)
   msg=$(git show -s --format='%B' "$commit_sha" 2>/dev/null)
-  if echo "$committer_email $author_email" | grep -qiE 'claude|attri-bot|\[bot\]'; then
+  if grep -qiE 'claude|attri-bot|\[bot\]' <<< "$committer_email $author_email"; then
     echo "true"; return
   fi
-  if echo "$msg" | grep -qiE 'Generated with Claude Code|Co-Authored-By: Claude'; then
+  if grep -qiE 'Generated with Claude Code|Co-Authored-By: Claude' <<< "$msg"; then
     echo "true"; return
   fi
   echo "false"
@@ -117,7 +117,7 @@ main() {
   findings_tsv=$(while IFS= read -r f; do
     [ -z "$f" ] && continue
     # Apply file-scope exclusion
-    if echo "$f" | grep -qE "$EXCLUDE_GLOB"; then
+    if grep -qE "$EXCLUDE_GLOB" <<< "$f"; then
       continue
     fi
     scan_file "$f"

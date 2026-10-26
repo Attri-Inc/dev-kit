@@ -192,7 +192,7 @@ runs:
           # Labels come from env (PR_LABELS_JSON) — see env: block above for why.
           if [ "$EVENT_NAME" = "pull_request" ]; then
             labels=$(printf '%s' "$PR_LABELS_JSON" | jq -r '.[].name' 2>/dev/null || echo "")
-            if echo "$labels" | grep -qx "pr-size: bypass-approved"; then
+            if grep -qx "pr-size: bypass-approved" <<< "$labels"; then
               echo "::notice::pr-size: bypass-approved label applied — hard limit waived for this PR."
               exit 0
             fi

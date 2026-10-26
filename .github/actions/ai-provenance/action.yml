@@ -80,18 +80,18 @@ runs:
           body=$(git log -1 --format='%B' "$sha")
 
           author_is_ai=false
-          if echo "$author" | grep -qiE "$AI_BOT_PATTERN"; then
+          if grep -qiE "$AI_BOT_PATTERN" <<< "$author"; then
             author_is_ai=true
           fi
 
           trailer_present=false
-          if echo "$body" | grep -qiE "$TRAILER_PATTERN"; then
+          if grep -qiE "$TRAILER_PATTERN" <<< "$body"; then
             trailer_present=true
             TRAILER_FOUND=true
           fi
 
           marker_present=false
-          if echo "$body" | grep -qiE "$AI_GEN_MARKER"; then
+          if grep -qiE "$AI_GEN_MARKER" <<< "$body"; then
             marker_present=true
           fi
 

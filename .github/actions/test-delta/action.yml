@@ -108,7 +108,7 @@ runs:
           # label names. `printf '%s'` + stdin keeps the JSON intact.
           if [ "$EVENT_NAME" = "pull_request" ]; then
             labels=$(printf '%s' "$PR_LABELS_JSON" | jq -r '.[].name' 2>/dev/null || echo "")
-            if printf '%s\n' "$labels" | grep -qxF -- "$BYPASS_LABEL"; then
+            if grep -qxF -- "$BYPASS_LABEL" <<< "$labels"; then
               echo "::notice::${BYPASS_LABEL} label applied — gate skipped."
               exit 0
             fi

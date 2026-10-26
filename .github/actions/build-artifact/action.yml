@@ -37,13 +37,13 @@ runs:
         fi
 
         # Per-language defaults
-        if echo "$LANGS" | grep -q python; then
+        if grep -q python <<< "$LANGS"; then
           if [ -f pyproject.toml ]; then
             python -m pip install --quiet build
             python -m build --outdir dist/
           fi
         fi
-        if echo "$LANGS" | grep -q typescript; then
+        if grep -q typescript <<< "$LANGS"; then
           if [ -f package.json ] && jq -e '.scripts.build' package.json > /dev/null 2>&1; then
             # Unlike the _typescript.yml jobs, nothing has set pnpm up here,
             # so corepack still earns its place — but the one bundled with Node
@@ -56,12 +56,12 @@ runs:
               $(ls -d dist build .next out 2>/dev/null | grep -v '^dist$' | head -3)
           fi
         fi
-        if echo "$LANGS" | grep -q go; then
+        if grep -q go <<< "$LANGS"; then
           if [ -f go.mod ]; then
             CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o dist/$(basename "$(pwd)") ./...
           fi
         fi
-        if echo "$LANGS" | grep -q java; then
+        if grep -q java <<< "$LANGS"; then
           if [ -f pom.xml ]; then
             mvn -B -ntp -DskipTests package
             cp target/*.jar dist/ 2>/dev/null || true
@@ -70,7 +70,7 @@ runs:
             find . -name "*.jar" -path "*/build/libs/*" -exec cp {} dist/ \; 2>/dev/null || true
           fi
         fi
-        if echo "$LANGS" | grep -q csharp; then
+        if grep -q csharp <<< "$LANGS"; then
           dotnet publish -c Release -o dist/
         fi
 
