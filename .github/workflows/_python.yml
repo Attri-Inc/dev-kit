@@ -381,6 +381,7 @@ jobs:
         run: |
           set -uo pipefail
           pip install --quiet pip-audit
+          if [ "$PM" = "uv" ]; then pip install --quiet uv; fi
           LOCK='${{ needs.detect-tooling.outputs.lockfile }}'
           if [ "$LOCK" = "none" ]; then
             if [ "${{ inputs.tier }}" = "dev" ]; then
@@ -397,7 +398,17 @@ jobs:
             ( cd "$1" && case "$PM" in
                 poetry) poetry export -f requirements.txt --without-hashes -o /tmp/_req.txt 2>/dev/null && pip-audit -r /tmp/_req.txt -f json ;;
                 pipenv) pip-audit -r Pipfile.lock -f json ;;
-                uv|pdm) pip-audit . -f json ;;
+                # uv: audit what uv.lock installs. `pip-audit .` re-resolves pyproject.toml with
+                # pip, which ignores the lock and [tool.uv] overrides, so it can audit (and fail
+                # on) versions the repo never installs. --no-deps: the lock is already the full
+                # set. uv export also prints what it writes, so its stdout is dropped: only
+                # pip-audit's JSON may reach the report. A checkout without uv.lock (say, the PR
+                # base) keeps the old way.
+                uv)     if [ -f uv.lock ]; then
+                          uv export --frozen --no-dev --no-hashes --no-emit-workspace -o /tmp/_req.txt >/dev/null \
+                            && pip-audit -r /tmp/_req.txt --no-deps --disable-pip -f json
+                        else pip-audit . -f json; fi ;;
+                pdm)    pip-audit . -f json ;;
                 pip)    if [ -f requirements.txt ]; then pip-audit -r requirements.txt -f json
                         else pip-audit . -f json; fi ;;
               esac ) > "$2" 2>/dev/null || true
