@@ -710,6 +710,14 @@ TOML
   grep -qF 'pip-audit -r requirements.txt -f json' "$ROOT/.github/workflows/_python.yml"
 }
 
+@test "_python.yml deps-vulns audits uv.lock, not a fresh pip resolution" {
+  # uv export echoes the requirements to stdout; it must not reach the JSON report.
+  grep -qF 'uv export --frozen --no-dev --no-hashes --no-emit-workspace -o /tmp/_req.txt >/dev/null' "$ROOT/.github/workflows/_python.yml"
+  grep -qF 'pip-audit -r /tmp/_req.txt --no-deps --disable-pip -f json' "$ROOT/.github/workflows/_python.yml"
+  # Without a uv.lock (e.g. the PR base), uv still falls back to auditing the project.
+  grep -qF 'else pip-audit . -f json; fi ;;' "$ROOT/.github/workflows/_python.yml"
+}
+
 @test "_docker.yml exposes opt-in reproducible Trivy DB (P3)" {
   grep -q 'trivy-skip-db-update' "$ROOT/.github/workflows/_docker.yml"
   grep -q 'skip-db-update:' "$ROOT/.github/workflows/_docker.yml"
