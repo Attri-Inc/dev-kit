@@ -799,3 +799,11 @@ TOML
   # Most recent commit should have the trailer
   git log -1 --format='%B' | grep -qF 'Co-Authored-By: Claude'
 }
+
+@test "_typescript.yml gives pnpm --if-present before the script name" {
+  # pnpm (10 and 11) hands every flag after the script name to the script, so
+  # `pnpm test --if-present` became `vitest run --if-present`, which Vitest
+  # refuses. `pnpm run --if-present test` keeps the flag with pnpm.
+  grep -q 'pnpm) pnpm run --if-present test ;;' "$ROOT/.github/workflows/_typescript.yml"
+  ! grep -q 'pnpm test --if-present' "$ROOT/.github/workflows/_typescript.yml"
+}
