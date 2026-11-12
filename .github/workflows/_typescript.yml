@@ -313,7 +313,7 @@ jobs:
         shell: bash
         run: |
           case "${{ needs.detect-tooling.outputs.package-manager }}" in
-            pnpm) pnpm test --if-present ;;
+            pnpm) pnpm run --if-present test ;;
             yarn) yarn test ;;
             npm)  npm test --if-present ;;
           esac
