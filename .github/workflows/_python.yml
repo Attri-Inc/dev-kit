@@ -424,7 +424,7 @@ jobs:
       # Patch-coverage gate: of the lines this PR changed, how many are tested?
       - name: Diff coverage gate
         if: ${{ !cancelled() && env.FIRST == 'true' && hashFiles('coverage.xml') != '' && runner.os == 'Linux' }}
-        uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
+        uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@test/perf-lm-multi-agent
         with:
           report: coverage.xml
           format: cobertura

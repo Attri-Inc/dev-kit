@@ -183,7 +183,7 @@ jobs:
       # Re-run only known first-party generators by name.
       - name: Codegen (first-party generators)
         if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.d.outputs.install-scripts != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/js-codegen@main
+        uses: Attri-Inc/dev-kit/.github/actions/js-codegen@test/perf-lm-multi-agent
 
       # ── Checks that need node_modules ──
       # Prefer the project's own `lint` script, so the repo's pinned ESLint
@@ -259,7 +259,7 @@ jobs:
           python-version: '3.12'
       - name: Diff coverage gate
         if: ${{ !cancelled() && steps.cov.outputs.report != '' }}
-        uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
+        uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@test/perf-lm-multi-agent
         with:
           report: ${{ steps.cov.outputs.report }}
           format: ${{ steps.cov.outputs.format }}
@@ -284,6 +284,6 @@ jobs:
       # bundlewatch config exists. Runs after the build, so budgets measure it.
       - name: Frontend quality (a11y + perf budgets)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        uses: Attri-Inc/dev-kit/.github/actions/frontend-quality@main
+        uses: Attri-Inc/dev-kit/.github/actions/frontend-quality@test/perf-lm-multi-agent
         with:
           enforcement: ${{ inputs.frontend-quality-enforcement }}

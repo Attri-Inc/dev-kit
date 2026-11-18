@@ -115,7 +115,7 @@ jobs:
       # Patch-coverage gate (Go profile → Cobertura, module prefix stripped). Warn-first.
       - name: Diff coverage gate
         if: hashFiles('coverage.out') != ''
-        uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
+        uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@test/perf-lm-multi-agent
         with:
           report: coverage.out
           format: golang

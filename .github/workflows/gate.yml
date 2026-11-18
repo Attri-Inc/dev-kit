@@ -1,7 +1,7 @@
 name: gate
 
 # Reusable workflow — call from project repos via:
-#   uses: Attri-Inc/dev-kit/.github/workflows/gate.yml@main
+#   uses: Attri-Inc/dev-kit/.github/workflows/gate.yml@test/perf-lm-multi-agent
 #
 # Tier-aware: dev (fast), qa/uat (medium), main (full supply-chain).
 # Auto-detects language stack and fans out to per-language jobs.
@@ -442,7 +442,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - id: detect
         if: steps.skip.outputs.skip == 'false'
-        uses: Attri-Inc/dev-kit/.github/actions/detect-stack@main
+        uses: Attri-Inc/dev-kit/.github/actions/detect-stack@test/perf-lm-multi-agent
         with:
           languages: ${{ inputs.languages }}
       - id: tier
@@ -526,7 +526,7 @@ jobs:
       # ── Secrets (every event, docs-only included) ──
       - name: Secret scan
         if: ${{ !cancelled() }}
-        uses: Attri-Inc/dev-kit/.github/actions/detect-secrets@main
+        uses: Attri-Inc/dev-kit/.github/actions/detect-secrets@test/perf-lm-multi-agent
         with:
           tier: ${{ needs.detect.outputs.tier }}
           fail-on-historic: ${{ inputs.secret-scan-historic-mode }}
@@ -534,7 +534,7 @@ jobs:
       # ── Hygiene (docs-only included: markdown, typos and identity apply) ──
       - name: Committer identity
         if: ${{ !cancelled() }}
-        uses: Attri-Inc/dev-kit/.github/actions/identity-check@main
+        uses: Attri-Inc/dev-kit/.github/actions/identity-check@test/perf-lm-multi-agent
         with:
           allowed-domains: ${{ inputs.allowed-author-domains }}
           tier: ${{ needs.detect.outputs.tier }}
@@ -561,7 +561,7 @@ jobs:
           fi
       - name: PR size guard
         if: ${{ !cancelled() && env.IS_PR == 'true' && needs.detect.outputs.onboarding-pr != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/pr-size-guard@main
+        uses: Attri-Inc/dev-kit/.github/actions/pr-size-guard@test/perf-lm-multi-agent
         with:
           soft-limit: ${{ inputs.pr-size-soft-limit }}
           hard-limit: ${{ inputs.pr-size-hard-limit }}
@@ -612,7 +612,7 @@ jobs:
           exit "$rc"
       - name: CODEOWNERS
         if: ${{ !cancelled() && env.IS_PR == 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/codeowners-check@main
+        uses: Attri-Inc/dev-kit/.github/actions/codeowners-check@test/perf-lm-multi-agent
         with:
           enforcement: ${{ inputs.codeowners-enforcement }}
           github-token: ${{ github.token }}
@@ -631,74 +631,74 @@ jobs:
       # ── Code scan (skipped on docs-only) ──
       - name: Trojan Source + homoglyph
         if: ${{ !cancelled() && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/trojan-source-scan@main
+        uses: Attri-Inc/dev-kit/.github/actions/trojan-source-scan@test/perf-lm-multi-agent
         with:
           enforcement: ${{ inputs.trojan-source-enforcement }}
       - name: MCP server allowlist
         if: ${{ !cancelled() && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/mcp-allowlist@main
+        uses: Attri-Inc/dev-kit/.github/actions/mcp-allowlist@test/perf-lm-multi-agent
         with:
           allowlist: ${{ inputs.mcp-allowlist }}
           enforcement: ${{ inputs.mcp-allowlist-enforcement }}
       - name: Log hygiene
         if: ${{ !cancelled() && env.IS_PR == 'true' && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/log-hygiene@main
+        uses: Attri-Inc/dev-kit/.github/actions/log-hygiene@test/perf-lm-multi-agent
         with:
           enforcement: ${{ inputs.log-hygiene-enforcement }}
 
       # ── Dependency scans (skipped on docs-only) ──
       - name: Dependency cooldown + confusion
         if: ${{ !cancelled() && env.IS_PR == 'true' && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/dep-supply-chain@main
+        uses: Attri-Inc/dev-kit/.github/actions/dep-supply-chain@test/perf-lm-multi-agent
         with:
           enforcement: ${{ inputs.dep-supply-chain-enforcement }}
           cooldown-days: ${{ inputs.dependency-cooldown-days }}
           internal-scopes: ${{ inputs.internal-scopes }}
       - name: License compliance
         if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/license-check@main
+        uses: Attri-Inc/dev-kit/.github/actions/license-check@test/perf-lm-multi-agent
         with:
           enforcement: ${{ inputs.license-enforcement }}
       - name: Vuln prioritization (KEV + EPSS)
         if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/vuln-prioritize@main
+        uses: Attri-Inc/dev-kit/.github/actions/vuln-prioritize@test/perf-lm-multi-agent
         with:
           enforcement: ${{ inputs.vuln-prioritize-enforcement }}
           fail-on: ${{ inputs.vuln-prioritize-fail-on }}
       - name: Malicious dependency scan (OSV)
         if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/malicious-deps@main
+        uses: Attri-Inc/dev-kit/.github/actions/malicious-deps@test/perf-lm-multi-agent
         with:
           enforcement: ${{ inputs.malicious-deps-enforcement }}
       - name: Policy-as-code (Conftest)
         if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/conftest-policy@main
+        uses: Attri-Inc/dev-kit/.github/actions/conftest-policy@test/perf-lm-multi-agent
         with:
           enforcement: ${{ inputs.conftest-enforcement }}
 
       # ── AI provenance + AI-specific verification ──
       - name: AI provenance + label
         if: ${{ !cancelled() && env.IS_PR == 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/ai-provenance@main
+        uses: Attri-Inc/dev-kit/.github/actions/ai-provenance@test/perf-lm-multi-agent
       - name: Agent rule-file scanner
         if: ${{ !cancelled() && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/agent-rule-scanner@main
+        uses: Attri-Inc/dev-kit/.github/actions/agent-rule-scanner@test/perf-lm-multi-agent
         with:
           fail-on: ${{ inputs.fail-on }}
           changed-only: ${{ needs.detect.outputs.tier == 'dev' && 'true' || 'false' }}
       - name: Import existence (slopsquat defense)
         if: ${{ !cancelled() && env.IS_PR == 'true' && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/import-existence@main
+        uses: Attri-Inc/dev-kit/.github/actions/import-existence@test/perf-lm-multi-agent
         with:
           fail-on: ${{ inputs.fail-on }}
       - name: Exception-swallow + auth-bypass detector
         if: ${{ !cancelled() && env.IS_PR == 'true' && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/exception-swallow@main
+        uses: Attri-Inc/dev-kit/.github/actions/exception-swallow@test/perf-lm-multi-agent
         with:
           fail-on: ${{ inputs.fail-on }}
       - name: Test delta gate
         if: ${{ !cancelled() && env.IS_PR == 'true' && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/test-delta@main
+        uses: Attri-Inc/dev-kit/.github/actions/test-delta@test/perf-lm-multi-agent
         with:
           min-prod-lines: '20'
           fail-on-missing: ${{ needs.detect.outputs.tier == 'main' && 'true' || 'false' }}
@@ -706,7 +706,7 @@ jobs:
           bypass-label: ${{ inputs.test-delta-bypass-label }}
       - name: Lint-disable detector
         if: ${{ !cancelled() && env.IS_PR == 'true' && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/lint-disable-detector@main
+        uses: Attri-Inc/dev-kit/.github/actions/lint-disable-detector@test/perf-lm-multi-agent
         with:
           fail-on: ${{ needs.detect.outputs.tier == 'main' && 'medium' || 'high' }}
       - name: Anthropic claude-code-security-review (diff-only)
@@ -732,7 +732,7 @@ jobs:
       # ── DB migration safety (main tier, per commit) ──
       - name: Migration safety
         if: ${{ !cancelled() && needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.docs-only != 'true' }}
-        uses: Attri-Inc/dev-kit/.github/actions/migration-safety@main
+        uses: Attri-Inc/dev-kit/.github/actions/migration-safety@test/perf-lm-multi-agent
 
   # ──────────────────────────────────────────────────────────────────
   # Per-language workflows (run only when the stack is detected)
@@ -888,7 +888,7 @@ jobs:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - id: build
-        uses: Attri-Inc/dev-kit/.github/actions/build-artifact@main
+        uses: Attri-Inc/dev-kit/.github/actions/build-artifact@test/perf-lm-multi-agent
         with:
           build-command: ${{ inputs.build-command }}
           languages: ${{ needs.detect.outputs.languages }}
@@ -932,7 +932,7 @@ jobs:
       # Advisory here; deploy-time verification of consumed images is hard-fail.
       - name: Verify the attestation we just created
         if: ${{ !github.event.repository.private }}
-        uses: Attri-Inc/dev-kit/.github/actions/verify-attestation@main
+        uses: Attri-Inc/dev-kit/.github/actions/verify-attestation@test/perf-lm-multi-agent
         with:
           subject: sbom.cdx.json
           subject-type: file
@@ -1012,7 +1012,7 @@ jobs:
       # concurrency cancel-in-progress would make it noisy.
       - name: Notify Google Chat on failure
         if: ${{ always() && contains(needs.*.result, 'failure') }}
-        uses: Attri-Inc/dev-kit/.github/actions/notify-gchat-ci@main
+        uses: Attri-Inc/dev-kit/.github/actions/notify-gchat-ci@test/perf-lm-multi-agent
         with:
           webhook_url: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
           github_token: ${{ github.token }}
