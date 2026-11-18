@@ -844,12 +844,16 @@ TOML
   [ "$refs" = "some-branch" ]
 }
 
-@test "nightly runs skip the per-commit checks (they already ran on the PR)" {
+@test "nightly runs the full gate; attestation is ONE job; examples schedule it off-hours" {
   G="$ROOT/.github/workflows/gate.yml"
-  # all 8 language workflows are off on schedule
-  [ "$(grep -cE "has-[a-z]+ == 'true'.*github.event_name != 'schedule'" "$G")" -eq 8 ]
+  # No check is dropped on schedule: the nightly run is the full gate.
+  ! grep -q "github.event_name != 'schedule'" "$G" || false
   # attestation is ONE job (no artifact hand-off between jobs)
   job_block "$G" attestation | grep -q 'actions/build-artifact@'
   job_block "$G" attestation | grep -q 'anchore/sbom-action@'
   job_block "$G" attestation | grep -q 'actions/attest-build-provenance@'
+  # 21:47 UTC = 03:17 IST, outside working hours
+  for f in "$ROOT"/examples/*/.github/workflows/attri-dev-kit.yml; do
+    grep -qF "cron: '47 21 * * *'" "$f"
+  done
 }

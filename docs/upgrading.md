@@ -93,8 +93,11 @@ was removed.
 - **`test-os` defaults to the resolved `runner`.** Tests used to go to
   GitHub-hosted `ubuntu-latest` even when `runner` was self-hosted. A wrapper
   that passes `test-os: '["ubuntu-latest"]'` explicitly keeps the old behavior.
-- **Nightly (`schedule`) runs** do only the full-history secret scan, the
-  dependency scans and attestation. Build, SBOM and Sigstore are one job.
+- **Build, SBOM and Sigstore are one `attestation` job** (same steps, no
+  artifact hand-off between jobs).
+- **The examples schedule the nightly run at 21:47 UTC (03:17 IST)** instead
+  of 07:17 UTC, which fell in Indian working hours. An existing wrapper keeps
+  its own `cron:` until you change it.
 - **`_ai-verification.yml` is gone**; its checks are steps of `Checks`.
 - **Base-branch fetches run only when the base is missing.** A `--depth`
   fetch into the full clone used to cut its history for every later step in

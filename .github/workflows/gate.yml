@@ -12,10 +12,6 @@ name: gate
 # Each step keeps its own `if:` and runs even after an earlier step failed
 # (`!cancelled()`), so a PR still sees every finding at once.
 #
-# Nightly (`schedule`) runs do only what can change without a commit: the
-# full-history secret scan, the dependency scans (new advisories), and
-# attestation. The PR already ran everything else on the same code.
-#
 # Concurrency is owned by the CALLER (the consumer's wrapper workflow,
 # or self-test.yml when we dogfood). Adding a concurrency block here too
 # silently breaks the dispatch — caller and callee end up trying to hold
@@ -420,10 +416,8 @@ jobs:
             CHANGED=$(git diff --name-only "origin/$BASE...HEAD" 2>/dev/null || true)
           elif [ "$EVENT" = "push" ] && [ -n "${BEFORE:-}" ] && git rev-parse -q --verify "$BEFORE^{commit}" >/dev/null; then
             CHANGED=$(git diff --name-only "$BEFORE...HEAD" 2>/dev/null || true)
-          elif [ "$EVENT" = "push" ]; then
-            CHANGED=$(git diff --name-only HEAD~1...HEAD 2>/dev/null || true)
           else
-            CHANGED=""
+            CHANGED=$(git diff --name-only HEAD~1...HEAD 2>/dev/null || true)
           fi
 
           ONBOARDING=false
@@ -433,7 +427,7 @@ jobs:
           fi
 
           DOCS_ONLY=false
-          if [ -n "$CHANGED" ] && ! grep -qivE '(\.md$|(^|/)docs/|(^|/)LICENSE|\.txt$|(^|/)\.gitignore$|(^|/)\.editorconfig$|\.(png|jpe?g|gif|svg|ico|webp|pdf)$)' <<< "$CHANGED"; then
+          if { [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "push" ]; } && [ -n "$CHANGED" ] && ! grep -qivE '(\.md$|(^|/)docs/|(^|/)LICENSE|\.txt$|(^|/)\.gitignore$|(^|/)\.editorconfig$|\.(png|jpe?g|gif|svg|ico|webp|pdf)$)' <<< "$CHANGED"; then
             DOCS_ONLY=true
             echo "::notice::docs-only change — gate checks skipped (only markdown/docs/text/images changed). gate-passed still reports success."
           fi
@@ -539,7 +533,7 @@ jobs:
 
       # ── Hygiene (docs-only included: markdown, typos and identity apply) ──
       - name: Committer identity
-        if: ${{ !cancelled() && github.event_name != 'schedule' }}
+        if: ${{ !cancelled() }}
         uses: Attri-Inc/dev-kit/.github/actions/identity-check@main
         with:
           allowed-domains: ${{ inputs.allowed-author-domains }}
@@ -550,12 +544,12 @@ jobs:
       # '.ecrc' and rejects latin1 files as utf-8, which would land unannounced
       # across every gated repo. Adopt v4 as its own change.
       - name: Editorconfig
-        if: ${{ !cancelled() && github.event_name != 'schedule' }}
+        if: ${{ !cancelled() }}
         uses: editorconfig-checker/action-editorconfig-checker@51f63319f592f97930c73d9c46184d20bd206393 # v3.0.0
         with:
           version: v3.11.3
       - name: Shell scripts must be LF
-        if: ${{ !cancelled() && github.event_name != 'schedule' }}
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           BAD="$(git ls-files --eol -- '*.sh' '*.bash' | grep -E '^i/(crlf|mixed)' || true)"
@@ -623,25 +617,25 @@ jobs:
           enforcement: ${{ inputs.codeowners-enforcement }}
           github-token: ${{ github.token }}
       - name: Markdown lint
-        if: ${{ !cancelled() && github.event_name != 'schedule' && needs.detect.outputs.run-medium == 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
         uses: DavidAnson/markdownlint-cli2-action@v24
         with:
           globs: '**/*.md'
           config: .github/.markdownlint.json
         continue-on-error: true
       - name: Typo check
-        if: ${{ !cancelled() && github.event_name != 'schedule' && needs.detect.outputs.run-medium == 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
         uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
         continue-on-error: true
 
       # ── Code scan (skipped on docs-only) ──
       - name: Trojan Source + homoglyph
-        if: ${{ !cancelled() && github.event_name != 'schedule' && needs.detect.outputs.docs-only != 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.docs-only != 'true' }}
         uses: Attri-Inc/dev-kit/.github/actions/trojan-source-scan@main
         with:
           enforcement: ${{ inputs.trojan-source-enforcement }}
       - name: MCP server allowlist
-        if: ${{ !cancelled() && github.event_name != 'schedule' && needs.detect.outputs.docs-only != 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.docs-only != 'true' }}
         uses: Attri-Inc/dev-kit/.github/actions/mcp-allowlist@main
         with:
           allowlist: ${{ inputs.mcp-allowlist }}
@@ -652,8 +646,7 @@ jobs:
         with:
           enforcement: ${{ inputs.log-hygiene-enforcement }}
 
-      # ── Dependency scans (skipped on docs-only; nightly keeps the
-      #    advisory-driven ones, since new advisories land without a commit) ──
+      # ── Dependency scans (skipped on docs-only) ──
       - name: Dependency cooldown + confusion
         if: ${{ !cancelled() && env.IS_PR == 'true' && needs.detect.outputs.docs-only != 'true' }}
         uses: Attri-Inc/dev-kit/.github/actions/dep-supply-chain@main
@@ -678,7 +671,7 @@ jobs:
         with:
           enforcement: ${{ inputs.malicious-deps-enforcement }}
       - name: Policy-as-code (Conftest)
-        if: ${{ !cancelled() && github.event_name != 'schedule' && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.docs-only != 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.docs-only != 'true' }}
         uses: Attri-Inc/dev-kit/.github/actions/conftest-policy@main
         with:
           enforcement: ${{ inputs.conftest-enforcement }}
@@ -688,7 +681,7 @@ jobs:
         if: ${{ !cancelled() && env.IS_PR == 'true' }}
         uses: Attri-Inc/dev-kit/.github/actions/ai-provenance@main
       - name: Agent rule-file scanner
-        if: ${{ !cancelled() && github.event_name != 'schedule' && needs.detect.outputs.docs-only != 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.docs-only != 'true' }}
         uses: Attri-Inc/dev-kit/.github/actions/agent-rule-scanner@main
         with:
           fail-on: ${{ inputs.fail-on }}
@@ -738,17 +731,16 @@ jobs:
 
       # ── DB migration safety (main tier, per commit) ──
       - name: Migration safety
-        if: ${{ !cancelled() && github.event_name != 'schedule' && needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.docs-only != 'true' }}
+        if: ${{ !cancelled() && needs.detect.outputs.run-supply-chain == 'true' && needs.detect.outputs.docs-only != 'true' }}
         uses: Attri-Inc/dev-kit/.github/actions/migration-safety@main
 
   # ──────────────────────────────────────────────────────────────────
-  # Per-language workflows (run only when the stack is detected). Not on
-  # nightly runs: they check code, and the PR already checked this code.
+  # Per-language workflows (run only when the stack is detected)
   # ──────────────────────────────────────────────────────────────────
   python:
     name: Python
     needs: detect
-    if: needs.detect.outputs.has-python == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && github.event_name != 'schedule'
+    if: needs.detect.outputs.has-python == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     uses: ./.github/workflows/_python.yml
     with:
       runner: ${{ needs.detect.outputs.runner }}
@@ -767,7 +759,7 @@ jobs:
   typescript:
     name: TypeScript / JavaScript
     needs: detect
-    if: needs.detect.outputs.has-typescript == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && github.event_name != 'schedule'
+    if: needs.detect.outputs.has-typescript == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     uses: ./.github/workflows/_typescript.yml
     with:
       runner: ${{ needs.detect.outputs.runner }}
@@ -784,7 +776,7 @@ jobs:
   java:
     name: Java
     needs: detect
-    if: needs.detect.outputs.has-java == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && github.event_name != 'schedule'
+    if: needs.detect.outputs.has-java == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     uses: ./.github/workflows/_java.yml
     with:
       runner: ${{ needs.detect.outputs.runner }}
@@ -797,7 +789,7 @@ jobs:
   go:
     name: Go
     needs: detect
-    if: needs.detect.outputs.has-go == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && github.event_name != 'schedule'
+    if: needs.detect.outputs.has-go == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     uses: ./.github/workflows/_go.yml
     with:
       runner: ${{ needs.detect.outputs.runner }}
@@ -811,7 +803,7 @@ jobs:
   terraform:
     name: Terraform
     needs: detect
-    if: needs.detect.outputs.has-terraform == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && github.event_name != 'schedule'
+    if: needs.detect.outputs.has-terraform == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     uses: ./.github/workflows/_terraform.yml
     with:
       runner: ${{ needs.detect.outputs.runner }}
@@ -822,7 +814,7 @@ jobs:
   docker:
     name: Docker
     needs: detect
-    if: needs.detect.outputs.has-docker == 'true' && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && github.event_name != 'schedule'
+    if: needs.detect.outputs.has-docker == 'true' && needs.detect.outputs.run-medium == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     uses: ./.github/workflows/_docker.yml
     with:
       runner: ${{ needs.detect.outputs.runner }}
@@ -832,7 +824,7 @@ jobs:
   shell:
     name: Shell
     needs: detect
-    if: needs.detect.outputs.has-shell == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && github.event_name != 'schedule'
+    if: needs.detect.outputs.has-shell == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     uses: ./.github/workflows/_shell.yml
     with:
       runner: ${{ needs.detect.outputs.runner }}
@@ -841,7 +833,7 @@ jobs:
   csharp:
     name: C#
     needs: detect
-    if: needs.detect.outputs.has-csharp == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true' && github.event_name != 'schedule'
+    if: needs.detect.outputs.has-csharp == 'true' && needs.detect.outputs.kit-skip == 'false' && needs.detect.outputs.docs-only != 'true'
     uses: ./.github/workflows/_csharp.yml
     with:
       runner: ${{ needs.detect.outputs.runner }}
@@ -900,6 +892,12 @@ jobs:
         with:
           build-command: ${{ inputs.build-command }}
           languages: ${{ needs.detect.outputs.languages }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: built-artifact
+          path: ${{ steps.build.outputs.artifact-path }}
+          if-no-files-found: warn
+          retention-days: ${{ inputs.artifact-retention-days }}
       - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: ./

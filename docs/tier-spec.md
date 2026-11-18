@@ -4,8 +4,7 @@ What runs at each tier and why.
 
 > **Job packaging:** the quick checks listed below run as *steps* inside one
 > `checks` job, and each language runs as one job (same checks, same coverage).
-> Nightly (`schedule`) runs keep only the full-history secret scan, the
-> dependency scans and attestation. See `docs/cost-optimization.md`.
+> See `docs/cost-optimization.md`.
 
 ## `tier: dev`
 **Trigger:** push to `dev` branch, or PR with `base: dev`

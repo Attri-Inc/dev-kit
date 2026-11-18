@@ -29,7 +29,7 @@ on:
     branches: [main, master, dev, dev-*, develop, qa, uat, staging, release/*]
     # No paths-ignore on pull_request: a filtered-out PR never reports "Gate passed" and stays blocked.
   schedule:
-    - cron: '17 7 * * *'   # daily nightly attestation (Scorecard + SBOM + Sigstore)
+    - cron: '47 21 * * *'  # daily nightly attestation, 03:17 IST (Scorecard + SBOM + Sigstore)
 concurrency:
   group: attri-dev-kit-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

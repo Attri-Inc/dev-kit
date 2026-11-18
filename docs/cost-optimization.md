@@ -13,10 +13,9 @@ lists the safe levers — none removes a check or reduces coverage.
 | **One job per language** | Each language workflow is one job: dependencies install once, then lint, type-check, security, audit, tests and build run as steps. Python went from 6 jobs to 1, TypeScript from 8 to 1. |
 | **`detect` on GitHub-hosted** | Every other job waits for `detect`, so it must not wait in the self-hosted queue. It absorbed the old `preflight` job, which was hosted already: still one billed minute. |
 | **Tests on the selected runner** | `test-os` defaults to the resolved `runner`. Before, tests always went to GitHub-hosted `ubuntu-latest`, even for self-hosted consumers. |
-| **Nightly does only what can change without a commit** | `schedule` runs do the full-history secret scan, the dependency scans (new advisories) and attestation. Language jobs and per-commit checks skip: the PR already ran them on the same code. |
 | **`docs-only` short-circuit** | When a PR/push changes only markdown/docs/text/images, the expensive per-language + AI + dependency jobs skip and `gate-passed` still reports success — so wrappers need no `paths-ignore` on `pull_request`. Conservative: code/lockfiles/configs/workflows are never "docs"; secret-scanning still runs. |
 | **Artifact retention** (`artifact-retention-days`, default 7) | SBOM / compliance-evidence uploads expire in 7 days instead of GitHub's 90, curbing Actions-storage growth. |
-| **Nightly attestation** (`attestation-frequency: nightly`, default) | Scorecard / SBOM / Sigstore run once daily, not per-commit (~$80–100/mo saved). Keep the default. |
+| **Nightly attestation** (`attestation-frequency: nightly`, default) | Scorecard / SBOM / Sigstore run once daily, not per-commit (~$80–100/mo saved). Keep the default. The examples schedule it at 21:47 UTC (03:17 IST), outside working hours, so it does not compete with PRs for runners. |
 | **Tiering** (`tier: auto`) | Heavy SAST / supply-chain / scorecard run at `qa`/`main`/nightly, never on every dev push. |
 
 ## Consumer-side (per-repo wrapper — opt-in rollout)
