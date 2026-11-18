@@ -51,7 +51,7 @@ Biome is selected automatically when `biome.json` is present (it lints AND forma
 
 Package manager auto-detected: pnpm (`pnpm-lock.yaml`) → yarn (`yarn.lock`) → npm (default).
 
-**Codegen (Prisma):** installs run with `--ignore-scripts` (supply-chain defense), which skips the `postinstall` hook generators like Prisma normally run from — so without help, lint and type-check would fail to resolve the generated client (`TS2305`/`TS7006`). When a Prisma schema is detected (`prisma/schema.prisma`, a `prisma.schema` field in `package.json`, or a `prisma.config.*` file), the lint and type-check jobs run `prisma generate --no-engine` before checking. This regenerates only the **types** (no query-engine binary download), and re-runs only that known first-party generator by name — never arbitrary third-party `postinstall` hooks — so consumer repos do **not** need to commit their generated client.
+**Codegen (Prisma):** the one install runs with `--ignore-scripts` (supply-chain defense) unless tests or the build will run, which need lifecycle scripts. Skipping scripts also skips the `postinstall` hook generators like Prisma normally run from — so without help, lint and type-check would fail to resolve the generated client (`TS2305`/`TS7006`). In that case, when a Prisma schema is detected (`prisma/schema.prisma`, a `prisma.schema` field in `package.json`, or a `prisma.config.*` file), the job runs `prisma generate --no-engine` before lint and type-check. This regenerates only the **types** (no query-engine binary download), and re-runs only that known first-party generator by name — never arbitrary third-party `postinstall` hooks — so consumer repos do **not** need to commit their generated client.
 
 ## Java
 

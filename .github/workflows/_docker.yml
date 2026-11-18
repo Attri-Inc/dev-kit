@@ -54,8 +54,10 @@ jobs:
           MATRIX=$(echo "$FILES" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map({dockerfile: ., context: (. | split("/") | .[:-1] | join("/") | if . == "" then "." else . end)}) | {include: .}')
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
-  hadolint:
-    name: hadolint ${{ matrix.dockerfile }}
+  # hadolint, build, Trivy and Dockle in ONE job per Dockerfile: the job waits
+  # for one runner instead of two.
+  build-and-scan:
+    name: hadolint + Build + Trivy + Dockle ${{ matrix.dockerfile }}
     needs: discover
     if: fromJson(needs.discover.outputs.matrix).include[0] != null
     runs-on: ${{ inputs.runner }}
@@ -103,18 +105,8 @@ jobs:
         with:
           sarif_file: hadolint.sarif
           category: hadolint-${{ matrix.dockerfile }}
-
-  build-and-scan:
-    name: Build + Trivy + Dockle ${{ matrix.dockerfile }}
-    needs: discover
-    if: fromJson(needs.discover.outputs.matrix).include[0] != null
-    runs-on: ${{ inputs.runner }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
-    steps:
-      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
+        if: ${{ !cancelled() }}
       - name: Cache Trivy DB
         uses: actions/cache@v6
         with:

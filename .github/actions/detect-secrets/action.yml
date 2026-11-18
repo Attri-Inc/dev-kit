@@ -66,8 +66,15 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        pip install --quiet detect-secrets==1.5.0 --break-system-packages
-        if [ ! -x /opt/trufflehog/trufflehog ]; then
+        # Runner images may ship the pinned tools; install only what is missing.
+        if [ "$(detect-secrets --version 2>/dev/null || true)" = "1.5.0" ]; then
+          echo "::notice::detect-secrets 1.5.0 preinstalled — skipping install."
+        else
+          pip install --quiet detect-secrets==1.5.0 --break-system-packages
+        fi
+        if [ "$(trufflehog --version 2>&1 | awk '{print $2}' || true)" = "3.83.7" ]; then
+          echo "::notice::trufflehog 3.83.7 preinstalled — skipping install."
+        elif [ ! -x /opt/trufflehog/trufflehog ]; then
           mkdir -p /opt/trufflehog
           # Fetch the install script at the SAME pinned tag as the binary, not
           # from the mutable main branch (a compromised main/install.sh would
@@ -229,7 +236,10 @@ runs:
         BASE_SHA=""
         PR_COMMITS=""
         if [ -n "$BASE_REF" ]; then
-          git fetch origin "$BASE_REF" --depth=200 2>/dev/null || true
+          # Fetch only when missing: a --depth fetch into a full clone cuts its history.
+          git rev-parse -q --verify "refs/remotes/origin/$BASE_REF" >/dev/null \
+            || git fetch --no-tags --depth=200 origin "$BASE_REF:refs/remotes/origin/$BASE_REF" 2>/dev/null \
+            || true
           BASE_SHA=$(git rev-parse "origin/$BASE_REF" 2>/dev/null || echo "")
           if [ -n "$BASE_SHA" ]; then
             PR_COMMITS=$(git rev-list "${BASE_SHA}..HEAD" 2>/dev/null || echo "")

@@ -25,6 +25,17 @@ from `@main`. To freeze everything, fork the kit and point at your fork. See
 4. The PR merges to main.
 5. **Every consumer on `@main` picks up the change on their next push.**
 
+## Testing a kit branch before it merges
+
+`gate.yml` loads the composite actions by full reference
+(`Attri-Inc/dev-kit/.github/actions/<name>@main`), so a branch that changes an
+action still runs main's copy — in the kit's own PR checks too. To test a
+branch for real:
+
+1. On the branch, run `scripts/set-kit-ref.sh <branch>` and commit the result.
+2. Point one or two consumer wrappers at `gate.yml@<branch>` and open PRs there.
+3. Before merging, run `scripts/set-kit-ref.sh main` and commit again.
+
 ## Branch protection is the safety net
 
 Because every kit merge reaches every consumer at once, the protection on the
@@ -64,3 +75,29 @@ If a kit change breaks your repo:
    - A job log link from the failing run, if your repo is public
    - A minimal reproduction
 3. We'll revert or hotfix on main.
+
+## Migration notes
+
+### 2026-11-18 — fewer jobs, less waiting
+
+On a self-hosted pool each job waits for a free runner, and that wait was most
+of a gate run. The gate now starts ~4 jobs per PR instead of ~13–20. No check
+was removed.
+
+- **Job names changed.** The quick checks are steps of one `Checks` job; each
+  language is one job (e.g. `Python / Lint, types, security, tests (<runner>)`).
+  `Gate passed` keeps its name. If branch protection requires any other job
+  name, switch it to `Gate passed`.
+- **`detect` runs on GitHub-hosted** and absorbed `preflight` (same one billed
+  minute).
+- **`test-os` defaults to the resolved `runner`.** Tests used to go to
+  GitHub-hosted `ubuntu-latest` even when `runner` was self-hosted. A wrapper
+  that passes `test-os: '["ubuntu-latest"]'` explicitly keeps the old behavior.
+- **Nightly (`schedule`) runs** do only the full-history secret scan, the
+  dependency scans and attestation. Build, SBOM and Sigstore are one job.
+- **`_ai-verification.yml` is gone**; its checks are steps of `Checks`.
+- **Base-branch fetches run only when the base is missing.** A `--depth`
+  fetch into the full clone used to cut its history for every later step in
+  the same job.
+- **Python installs use uv** (`uv pip install`), and the kit's own tools run
+  through `uvx`.

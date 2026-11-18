@@ -12,6 +12,19 @@ setup() {
   ROOT="$(git rev-parse --show-toplevel)"
 }
 
+# Print one job (from its `  <job>:` line to the next top-level job) of a workflow.
+job_block() {  # $1 = workflow file, $2 = job id
+  awk -v j="  $2:" '$0==j{f=1; print; next} f&&/^  [A-Za-z0-9_-]+:$/{exit} f' "$1"
+}
+
+# True when an action runs as a step of gate.yml's `checks` job, and that job
+# is in gate-passed's needs (so a failure blocks the PR).
+in_required_checks() {  # $1 = action dir name
+  G="$ROOT/.github/workflows/gate.yml"
+  job_block "$G" checks | grep -q "actions/$1@"
+  job_block "$G" gate-passed | grep -qE '^      - checks$'
+}
+
 # ─── Static structure ───────────────────────────────────────────────
 
 @test "detect-stack action exists and is composite YAML" {
@@ -227,11 +240,8 @@ setup() {
   grep -q 'A?GPL' "$ROOT/.github/actions/license-check/action.yml"
 }
 
-@test "gate.yml wires license-scan job and requires it in gate-passed" {
-  grep -q 'actions/license-check' "$ROOT/.github/workflows/gate.yml"
-  grep -q 'actions/license-check' "$ROOT/.github/workflows/gate.yml"
-  # present in the gate-passed needs list
-  awk '/gate-passed:/{f=1} f&&/- dep-scan/{print "found"}' "$ROOT/.github/workflows/gate.yml" | grep -q found
+@test "gate.yml wires license-check into the required checks job" {
+  in_required_checks license-check
 }
 
 @test "provenance verification is wired into the gate self-check" {
@@ -270,31 +280,38 @@ XML
   [ "$status" -eq 0 ]   # 50% >= 40% → pass
 }
 
-@test "cost A1: quick checks consolidated into hygiene/code-scan/dep-scan, all required" {
-  for j in hygiene code-scan dep-scan; do
-    grep -q "^  $j:" "$ROOT/.github/workflows/gate.yml"
-    awk -v g="- $j" '/gate-passed:/{f=1} f&&$0 ~ g{print "found"}' "$ROOT/.github/workflows/gate.yml" | grep -q found
+@test "cost A1: quick checks run as steps of ONE checks job, required by gate-passed" {
+  G="$ROOT/.github/workflows/gate.yml"
+  for a in detect-secrets identity-check pr-size-guard codeowners-check trojan-source-scan \
+           mcp-allowlist log-hygiene dep-supply-chain license-check vuln-prioritize \
+           malicious-deps conftest-policy ai-provenance agent-rule-scanner import-existence \
+           exception-swallow test-delta lint-disable-detector migration-safety; do
+    in_required_checks "$a"
   done
-  # each grouped check runs even if a prior one fails (so a dev sees all findings)
-  [ "$(grep -c 'if: ${{ !cancelled()' "$ROOT/.github/workflows/gate.yml")" -ge 12 ]
-  # the merged checks' actions are still wired (as steps)
-  for a in identity-check codeowners-check trojan-source-scan mcp-allowlist log-hygiene \
-           dep-supply-chain license-check vuln-prioritize malicious-deps conftest-policy pr-size-guard; do
-    grep -q "actions/$a@" "$ROOT/.github/workflows/gate.yml"
+  # Every check runs even if an earlier one failed, so a dev sees all findings:
+  # each `if:` in the checks job carries !cancelled().
+  [ "$(job_block "$G" checks | grep -c '^        if:')" -ge 20 ]
+  ! job_block "$G" checks | grep '^        if:' | grep -vq '!cancelled()' || false
+  # The old one-job-per-check layout is gone.
+  for j in preflight actionlint secrets-scan hygiene code-scan dep-scan ai-provenance ai-verification \
+           migration-safety build-artifact sbom attest notify-gchat; do
+    ! grep -q "^  $j:" "$G" || false
   done
 }
 
-@test "cost A2: detect emits docs-only; expensive jobs skip on it but secrets-scan does NOT" {
-  grep -q 'docs-only:' "$ROOT/.github/workflows/gate.yml"
-  grep -q 'id: docsonly' "$ROOT/.github/workflows/gate.yml"
-  [ "$(grep -cE "has-[a-z]+ == 'true'.*docs-only != 'true'" "$ROOT/.github/workflows/gate.yml")" -eq 8 ]
-  ln=$(grep -n '^  secrets-scan:' "$ROOT/.github/workflows/gate.yml" | cut -d: -f1)
-  ! sed -n "${ln},$((ln+4))p" "$ROOT/.github/workflows/gate.yml" | grep -q 'docs-only'
+@test "cost A2: detect emits docs-only; expensive jobs skip on it but the secret scan does NOT" {
+  G="$ROOT/.github/workflows/gate.yml"
+  job_block "$G" detect | grep -q 'docs-only: ${{ steps.changes.outputs.docs-only }}'
+  [ "$(grep -cE "has-[a-z]+ == 'true'.*docs-only != 'true'" "$G")" -eq 8 ]
+  job_block "$G" checks | grep -A1 'name: Secret scan' | grep -q "if: \${{ !cancelled() }}"
 }
 
-@test "cost A4: artifact-retention-days input + retention-days on the 3 gate uploads" {
-  grep -q 'artifact-retention-days:' "$ROOT/.github/workflows/gate.yml"
-  [ "$(grep -c 'retention-days: ${{ inputs.artifact-retention-days }}' "$ROOT/.github/workflows/gate.yml")" -eq 3 ]
+@test "cost A4: artifact-retention-days input + retention-days on every gate upload" {
+  G="$ROOT/.github/workflows/gate.yml"
+  grep -q 'artifact-retention-days:' "$G"
+  uploads=$(grep -c 'uses: actions/upload-artifact@' "$G")
+  [ "$uploads" -ge 2 ]
+  [ "$(grep -c 'retention-days: ${{ inputs.artifact-retention-days }}' "$G")" -eq "$uploads" ]
 }
 
 @test "scripts are all executable" {
@@ -310,7 +327,7 @@ XML
   # gate emits machine-readable evidence + wires conftest into the required gate
   grep -q 'Emit compliance evidence' "$ROOT/.github/workflows/gate.yml"
   grep -q 'compliance-evidence' "$ROOT/.github/workflows/gate.yml"
-  awk '/gate-passed:/{f=1} f&&/- dep-scan/{print "found"}' "$ROOT/.github/workflows/gate.yml" | grep -q found
+  in_required_checks conftest-policy
 }
 
 @test "trojan-source-scan: BiDi + homoglyph across source, excludes fixtures, wired + required" {
@@ -318,16 +335,14 @@ XML
   grep -q "using: 'composite'" "$ROOT/.github/actions/trojan-source-scan/action.yml"
   grep -q '0400' "$ROOT/.github/actions/trojan-source-scan/action.yml"   # Cyrillic range (homoglyph)
   grep -q 'tests/fixtures' "$ROOT/.github/actions/trojan-source-scan/action.yml"  # excluded
-  grep -q 'actions/trojan-source-scan' "$ROOT/.github/workflows/gate.yml"
-  awk '/gate-passed:/{f=1} f&&/- code-scan/{print "found"}' "$ROOT/.github/workflows/gate.yml" | grep -q found
+  in_required_checks trojan-source-scan
 }
 
 @test "mcp-allowlist action: approved-server enforcement, wired + required" {
   [ -f "$ROOT/.github/actions/mcp-allowlist/action.yml" ]
   grep -q "using: 'composite'" "$ROOT/.github/actions/mcp-allowlist/action.yml"
   grep -q 'mcpServers' "$ROOT/.github/actions/mcp-allowlist/action.yml"
-  grep -q 'actions/mcp-allowlist' "$ROOT/.github/workflows/gate.yml"
-  awk '/gate-passed:/{f=1} f&&/- code-scan/{print "found"}' "$ROOT/.github/workflows/gate.yml" | grep -q found
+  in_required_checks mcp-allowlist
 }
 
 @test "dep-supply-chain action: cooldown + confusion, wired + required" {
@@ -336,8 +351,7 @@ XML
   grep -qE "default: 'warn'" "$ROOT/.github/actions/dep-supply-chain/action.yml"
   grep -qi 'cooldown' "$ROOT/.github/actions/dep-supply-chain/action.yml"
   grep -qi 'dependency-confusion' "$ROOT/.github/actions/dep-supply-chain/action.yml"
-  grep -q 'actions/dep-supply-chain' "$ROOT/.github/workflows/gate.yml"
-  awk '/gate-passed:/{f=1} f&&/- dep-scan/{print "found"}' "$ROOT/.github/workflows/gate.yml" | grep -q found
+  in_required_checks dep-supply-chain
 }
 
 @test "malicious-deps action: composite, OSV malicious-packages (MAL-*), wired + required" {
@@ -345,8 +359,7 @@ XML
   grep -q "using: 'composite'" "$ROOT/.github/actions/malicious-deps/action.yml"
   grep -q 'osv-scanner' "$ROOT/.github/actions/malicious-deps/action.yml"
   grep -q 'MAL-' "$ROOT/.github/actions/malicious-deps/action.yml"
-  grep -q 'actions/malicious-deps' "$ROOT/.github/workflows/gate.yml"
-  awk '/gate-passed:/{f=1} f&&/- dep-scan/{print "found"}' "$ROOT/.github/workflows/gate.yml" | grep -q found
+  in_required_checks malicious-deps
 }
 
 @test "vuln-prioritize action: composite, warn-first, uses CISA KEV + EPSS feeds" {
@@ -357,9 +370,8 @@ XML
   grep -q 'api.first.org/data/v1/epss' "$ROOT/.github/actions/vuln-prioritize/action.yml"
 }
 
-@test "gate.yml wires vuln-prioritize job and requires it in gate-passed" {
-  grep -q 'actions/vuln-prioritize' "$ROOT/.github/workflows/gate.yml"
-  awk '/gate-passed:/{f=1} f&&/- dep-scan/{print "found"}' "$ROOT/.github/workflows/gate.yml" | grep -q found
+@test "gate.yml wires vuln-prioritize into the required checks job" {
+  in_required_checks vuln-prioritize
 }
 
 @test "_csharp.yml runs Semgrep SAST with C# rulesets + guarded SARIF upload" {
@@ -415,9 +427,10 @@ XML
   grep -q 'size-limit' "$ROOT/.github/actions/frontend-quality/action.yml"
 }
 
-@test "_typescript.yml wires the frontend-quality job" {
-  grep -q '^  frontend-quality:' "$ROOT/.github/workflows/_typescript.yml"
-  grep -q 'actions/frontend-quality' "$ROOT/.github/workflows/_typescript.yml"
+@test "_typescript.yml runs frontend-quality after the build" {
+  T="$ROOT/.github/workflows/_typescript.yml"
+  grep -q 'actions/frontend-quality' "$T"
+  grep -A1 'name: Frontend quality' "$T" | grep -q "steps.build.outcome == 'success'"
 }
 
 @test "log-hygiene action: composite, warn-first, value-adjacency (no prose FP)" {
@@ -428,9 +441,8 @@ XML
   grep -q 'SEC_USED' "$ROOT/.github/actions/log-hygiene/action.yml"
 }
 
-@test "gate.yml wires log-hygiene job and requires it in gate-passed" {
-  grep -q 'actions/log-hygiene' "$ROOT/.github/workflows/gate.yml"
-  awk '/gate-passed:/{f=1} f&&/- code-scan/{print "found"}' "$ROOT/.github/workflows/gate.yml" | grep -q found
+@test "gate.yml wires log-hygiene into the required checks job" {
+  in_required_checks log-hygiene
 }
 
 @test "codeowners-check action: composite, warn-first, uses GitHub's errors API" {
@@ -440,9 +452,8 @@ XML
   grep -q 'codeowners/errors' "$ROOT/.github/actions/codeowners-check/action.yml"
 }
 
-@test "gate.yml wires codeowners job + requires it; template shipped; kit dogfoods catch-all" {
-  grep -q 'actions/codeowners-check' "$ROOT/.github/workflows/gate.yml"
-  awk '/gate-passed:/{f=1} f&&/- hygiene/{print "found"}' "$ROOT/.github/workflows/gate.yml" | grep -q found
+@test "gate.yml wires codeowners-check (required); template shipped; kit dogfoods catch-all" {
+  in_required_checks codeowners-check
   [ -f "$ROOT/policies/CODEOWNERS.template" ]
   grep -qE '^\*[[:space:]]+\S' "$ROOT/CODEOWNERS"   # kit's own CODEOWNERS has a catch-all
 }
@@ -465,7 +476,7 @@ XML
 
 @test "_python.yml supports poetry/pipenv/uv/pdm/pip lockfiles" {
   for pm in poetry pipenv uv pdm pip; do
-    grep -q "pm=$pm" "$ROOT/.github/workflows/_python.yml"
+    grep -qE "PM=$pm +LOCK=" "$ROOT/.github/workflows/_python.yml"
   done
 }
 
@@ -606,24 +617,26 @@ TOML
   grep -q 'BYPASS_LABEL' "$ROOT/.github/actions/test-delta/action.yml"
 }
 
-@test "test-delta bypass is wired gate.yml -> _ai-verification.yml -> action" {
-  grep -q 'skip-test-delta:' "$ROOT/.github/workflows/gate.yml"
-  grep -q 'test-delta-bypass-label:' "$ROOT/.github/workflows/gate.yml"
-  grep -q 'skip-test-delta:' "$ROOT/.github/workflows/_ai-verification.yml"
-  grep -q 'skip: ' "$ROOT/.github/workflows/_ai-verification.yml"
+@test "test-delta bypass is wired gate.yml inputs -> checks step -> action" {
+  G="$ROOT/.github/workflows/gate.yml"
+  grep -q 'skip-test-delta:' "$G"
+  grep -q 'test-delta-bypass-label:' "$G"
+  job_block "$G" checks | grep -q 'skip: ${{ inputs.skip-test-delta }}'
+  job_block "$G" checks | grep -q 'bypass-label: ${{ inputs.test-delta-bypass-label }}'
 }
 
-@test "_ai-verification.yml workflow exists and includes all 5 jobs" {
-  [ -f "$ROOT/.github/workflows/_ai-verification.yml" ]
-  for job in 'agent-rule-scan' 'import-existence' 'exception-swallow' 'test-delta' 'claude-security-review'; do
-    grep -q "$job:" "$ROOT/.github/workflows/_ai-verification.yml"
+@test "AI verification checks all run as steps of the checks job" {
+  [ ! -f "$ROOT/.github/workflows/_ai-verification.yml" ]
+  for a in agent-rule-scanner import-existence exception-swallow test-delta lint-disable-detector; do
+    in_required_checks "$a"
   done
+  job_block "$ROOT/.github/workflows/gate.yml" checks | grep -q 'anthropics/claude-code-security-review@'
 }
 
-@test "gate.yml wires ai-provenance + ai-verification" {
-  grep -q 'ai-provenance:' "$ROOT/.github/workflows/gate.yml"
-  grep -q 'ai-verification:' "$ROOT/.github/workflows/gate.yml"
-  grep -q '_ai-verification.yml' "$ROOT/.github/workflows/gate.yml"
+@test "gate.yml wires ai-provenance, and passes no secret wholesale" {
+  in_required_checks ai-provenance
+  # `secrets: inherit` would hand every repo/org secret to a called workflow.
+  ! grep -qE '^[[:space:]]+secrets: inherit' "$ROOT/.github/workflows/gate.yml" || false
 }
 
 @test "gitleaks ships auth-bypass + default-secret rules" {
@@ -645,15 +658,19 @@ TOML
 
 # ─── Release-path friction reductions (points 1–5) ──────────────────
 
-@test "cross-OS test matrix is opt-in (default ubuntu) and only on py/ts/go" {
+@test "language matrix follows the resolved runner; cross-OS is opt-in, py/ts/go only" {
   for w in _python _go _typescript; do
     grep -qF 'os: ${{ fromJSON(inputs.test-os) }}' "$ROOT/.github/workflows/$w.yml"
-    grep -qF "default: '[\"ubuntu-latest\"]'" "$ROOT/.github/workflows/$w.yml"   # default = no change
+    grep -qF "default: '[\"ubuntu-latest\"]'" "$ROOT/.github/workflows/$w.yml"   # standalone default
   done
   # java/csharp have no test-os matrix, so gate.yml must NOT pass them test-os
   ! grep -q 'test-os' "$ROOT/.github/workflows/_java.yml"
   ! grep -q 'test-os' "$ROOT/.github/workflows/_csharp.yml"
-  [ "$(grep -cF 'test-os: ${{ inputs.test-os }}' "$ROOT/.github/workflows/gate.yml")" -eq 3 ]
+  # gate.yml: empty test-os (default) = the resolved runner, so tests do not
+  # silently leave a self-hosted pool for GitHub-hosted runners.
+  G="$ROOT/.github/workflows/gate.yml"
+  awk '/^      test-os:/{f=1} f&&/default:/{print; exit}' "$G" | grep -qF "default: ''"
+  [ "$(grep -c "test-os: .{{ inputs.test-os || format(.*needs.detect.outputs.runner) }}" "$G")" -eq 3 ]
 }
 
 @test "pr-size-guard applies per-language density weighting (default on)" {
@@ -723,12 +740,14 @@ TOML
   grep -q 'skip-db-update:' "$ROOT/.github/workflows/_docker.yml"
 }
 
-@test "_typescript.yml hardens non-build installs with --ignore-scripts" {
-  # 3 non-build jobs (ESLint, tsc, deps-vulns) harden npm install...
-  [ "$(grep -c 'npm ci --ignore-scripts ;;' "$ROOT/.github/workflows/_typescript.yml")" -eq 3 ]
-  # ...while BUILD-CLASS jobs (test, frontend-quality) are intentionally left
-  # un-hardened because a postinstall lifecycle script may be required to build.
-  [ "$(grep -c 'npm ci ;;' "$ROOT/.github/workflows/_typescript.yml")" -eq 2 ]
+@test "_typescript.yml runs install scripts only when tests or the build need them" {
+  T="$ROOT/.github/workflows/_typescript.yml"
+  # One install; --ignore-scripts unless tests or the build will run.
+  grep -q 'ARGS=(); \[ "$SCRIPTS" = true \] || ARGS=(--ignore-scripts)' "$T"
+  grep -q 'if \[ "$TESTS" = true \] || \[ "$RUN_BUILD" = true \]; then SCRIPTS=true; fi' "$T"
+  [ "$(grep -c 'npm ci "${ARGS\[@\]}" ;;' "$T")" -eq 1 ]
+  # First-party codegen replaces the skipped postinstall only when scripts were skipped.
+  grep -A1 'name: Codegen' "$T" | grep -q "install-scripts != 'true'"
 }
 
 @test "tool-presence probes tolerate a missing tool under set -e" {
@@ -806,4 +825,31 @@ TOML
   # refuses. `pnpm run --if-present test` keeps the flag with pnpm.
   grep -q 'pnpm) pnpm run --if-present test ;;' "$ROOT/.github/workflows/_typescript.yml"
   ! grep -q 'pnpm test --if-present' "$ROOT/.github/workflows/_typescript.yml"
+}
+
+@test "no --depth fetch can cut a full clone (fetch only when the base is missing)" {
+  # `git fetch --depth=N` into a full clone makes it shallow. Steps that share
+  # a job would then see cut history (trufflehog, commitlint, merge-base).
+  bad=$(grep -rn 'git fetch.*--depth' "$ROOT/.github" | grep -v '|| git fetch' || true)
+  [ -z "$bad" ] || { echo "$bad"; false; }
+}
+
+
+@test "set-kit-ref.sh points every internal kit reference at one ref" {
+  tmp="$(mktemp -d)"
+  cp -R "$ROOT/.github" "$ROOT/scripts" "$tmp/"
+  "$tmp/scripts/set-kit-ref.sh" some-branch >/dev/null
+  refs=$(grep -rhoE 'Attri-Inc/dev-kit/\.github/[^@[:space:]]+@[^[:space:]]+' "$tmp/.github" | sed 's/.*@//' | sort -u)
+  rm -rf "$tmp"
+  [ "$refs" = "some-branch" ]
+}
+
+@test "nightly runs skip the per-commit checks (they already ran on the PR)" {
+  G="$ROOT/.github/workflows/gate.yml"
+  # all 8 language workflows are off on schedule
+  [ "$(grep -cE "has-[a-z]+ == 'true'.*github.event_name != 'schedule'" "$G")" -eq 8 ]
+  # attestation is ONE job (no artifact hand-off between jobs)
+  job_block "$G" attestation | grep -q 'actions/build-artifact@'
+  job_block "$G" attestation | grep -q 'anchore/sbom-action@'
+  job_block "$G" attestation | grep -q 'actions/attest-build-provenance@'
 }

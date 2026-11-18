@@ -57,7 +57,10 @@ runs:
         fi
 
         # Compute changed-file list from the PR diff
-        git fetch --no-tags --depth=50 origin "$BASE" 2>/dev/null || true
+        # Fetch only when missing: a --depth fetch into a full clone cuts its history.
+        git rev-parse -q --verify "refs/remotes/origin/$BASE" >/dev/null \
+          || git fetch --no-tags --depth=50 origin "$BASE:refs/remotes/origin/$BASE" 2>/dev/null \
+          || true
         FILES_LIST=$(mktemp)
         git diff --name-only --diff-filter=AM "origin/$BASE...HEAD" > "$FILES_LIST"
         FILE_COUNT=$(wc -l < "$FILES_LIST")

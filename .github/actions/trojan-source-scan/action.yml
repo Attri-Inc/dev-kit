@@ -33,7 +33,10 @@ runs:
         set -uo pipefail
 
         if [ "$CHANGED_ONLY" = "true" ] && [ -n "${BASE:-}" ]; then
-          git fetch origin "$BASE" --depth=50 2>/dev/null || true
+          # Fetch only when missing: a --depth fetch into a full clone cuts its history.
+          git rev-parse -q --verify "refs/remotes/origin/$BASE" >/dev/null \
+            || git fetch --no-tags --depth=50 origin "$BASE:refs/remotes/origin/$BASE" 2>/dev/null \
+            || true
           mapfile -t FILES < <(git diff --name-only "origin/${BASE}...HEAD" 2>/dev/null || true)
         else
           mapfile -t FILES < <(git ls-files 2>/dev/null || true)

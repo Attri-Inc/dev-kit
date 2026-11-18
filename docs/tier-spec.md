@@ -2,9 +2,10 @@
 
 What runs at each tier and why.
 
-> **Job packaging:** the quick checks listed below run as *steps* inside three
-> grouped jobs — `hygiene`, `code-scan`, `dep-scan` — to cut GitHub's per-job
-> minute rounding (same checks, same coverage). See `docs/cost-optimization.md`.
+> **Job packaging:** the quick checks listed below run as *steps* inside one
+> `checks` job, and each language runs as one job (same checks, same coverage).
+> Nightly (`schedule`) runs keep only the full-history secret scan, the
+> dependency scans and attestation. See `docs/cost-optimization.md`.
 
 ## `tier: dev`
 **Trigger:** push to `dev` branch, or PR with `base: dev`
@@ -22,7 +23,7 @@ What runs at each tier and why.
 | Lang lint | Ruff / Biome / Checkstyle / golangci-lint / etc. | Yes |
 | Lang type-check | mypy / tsc / etc. | Soft fail at dev |
 | Lang test | pytest / vitest / go test / etc. | Yes |
-| Cross-OS test matrix | Opt-in via `test-os` (default `["ubuntu-latest"]`). Set `["ubuntu-latest","macos-latest","windows-latest"]` to run Python/TS/Go tests cross-platform (libs/CLIs). Coverage/lint run once on Linux | — |
+| Cross-OS test matrix | Opt-in via `test-os` (default: the resolved `runner`). Set `["ubuntu-latest","macos-latest","windows-latest"]` to run Python/TS/Go tests cross-platform (libs/CLIs). Coverage/lint run once, on the first entry | — |
 | Diff coverage | % of CHANGED lines covered by tests (patch coverage, via diff-cover) — `diff-coverage-min` default 80 | Warn by default (`diff-coverage-enforcement: fail` to block); PR-only |
 
 ## `tier: qa` and `tier: uat`

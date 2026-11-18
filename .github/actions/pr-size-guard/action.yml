@@ -81,7 +81,10 @@ runs:
         set -euo pipefail
 
         BASE_REF="${GITHUB_BASE_REF:-main}"
-        git fetch origin "$BASE_REF" --depth=50 2>/dev/null || true
+        # Fetch only when missing: a --depth fetch into a full clone cuts its history.
+        git rev-parse -q --verify "refs/remotes/origin/$BASE_REF" >/dev/null \
+          || git fetch --no-tags --depth=50 origin "$BASE_REF:refs/remotes/origin/$BASE_REF" 2>/dev/null \
+          || true
         BASE="origin/$BASE_REF"
         if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
           BASE=$(git rev-parse HEAD~1)

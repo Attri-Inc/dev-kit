@@ -10,13 +10,14 @@ results, commit, actor, timestamp — see the `gate-passed` job); this doc says
 > evidence**, not a certification. Frameworks overlap heavily (40–85%), so one
 > gate often serves several at once.
 
-> **Job packaging (cost optimization):** the quick checks now run as *steps*
-> inside three grouped jobs — `hygiene` (identity, editorconfig, pr-size,
-> commit-msg, codeowners, markdown, typos), `code-scan` (trojan-source, MCP
-> allowlist, log-hygiene), and `dep-scan` (dep-cooldown, license, vuln-prioritize,
-> malicious-deps, conftest) — rather than one job each. **Coverage is identical**;
-> only the `compliance-evidence.json` `checks` keys changed from per-check to the
-> three group ids. See `docs/cost-optimization.md`.
+> **Job packaging (cost optimization):** the quick checks run as *steps* of one
+> `checks` job (secrets, identity, editorconfig, pr-size, commit-msg, codeowners,
+> markdown, typos, trojan-source, MCP allowlist, log-hygiene, dep-cooldown,
+> license, vuln-prioritize, malicious-deps, conftest, AI provenance + AI
+> verification, migration-safety), and each language runs as one job.
+> **Coverage is identical**; the `compliance-evidence.json` `checks` keys are the
+> job ids (`checks`, `python`, ...). Per-step results are in the run log. See
+> `docs/cost-optimization.md`.
 
 | Kit gate / action | SOC 2 | ISO 27001:2022 | NIST SSDF (800-218) | PCI-DSS 4.0 | HIPAA §164 |
 |---|---|---|---|---|---|

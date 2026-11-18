@@ -110,7 +110,7 @@ project or service account is required for one-way alerts.
 
 ## AI-verification checks
 
-Hard-block PRs introducing AI-generated patterns the deep-research pass surfaced as the highest-risk classes. Wired into `_ai-verification.yml` and required by `gate-passed`.
+Hard-block PRs introducing AI-generated patterns the deep-research pass surfaced as the highest-risk classes. They run as steps of the gate's `checks` job, which `gate-passed` requires.
 
 - **`lint-disable`** — blocks PRs that add unjustified `# noqa`, `# type: ignore`, `// @ts-ignore`, `// eslint-disable`, etc. Bypass via inline `# reason: <why>` or `lint-disable-approved` PR label. Escalates message when the disable was added by an AI-authored commit.
 
