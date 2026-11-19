@@ -14,7 +14,7 @@ What runs at each tier and why.
 | Job | What | Hard fails? |
 |---|---|---|
 | actionlint | Workflow YAML lint | Yes (warning level) |
-| detect-secrets + trufflehog | Secret scan (verified-only; current tree at `dev`, full history at `qa`/`main`) | Yes |
+| detect-secrets + trufflehog | Secret scan. detect-secrets: on a `dev`/`qa` PR, only the files the PR adds or changes; on a `main`-tier PR and on non-PR runs, every file. trufflehog (verified-only): current tree at `dev`, full history at `qa`/`main` | Yes |
 | identity-check | Reject emails outside `allowed-author-domains` (`*.local`, Gmail, …). Off when the input is empty | Soft fail (warning only at `dev`) |
 | commit-msg | Conventional Commits PR title | No by default (warn; set `commit-msg-fail-level: error` to block) |
 | editorconfig | Whitespace/EOL policy | Yes |

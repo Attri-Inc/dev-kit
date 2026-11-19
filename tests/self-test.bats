@@ -395,9 +395,9 @@ XML
   ! grep -rqE 'uses:[[:space:]]*hadolint/hadolint-action' "$ROOT/.github/"
   # reviewdog/action-actionlint is a Docker action pulled from ghcr.io.
   ! grep -rqE 'uses:[[:space:]]*reviewdog/action-actionlint' "$ROOT/.github/"
-  # Trivy: only the image scan (which needs a built image) may use trivy-action.
-  [ "$(grep -rcE 'uses:[[:space:]]*aquasecurity/trivy-action' "$ROOT/.github/" | awk -F: '{s+=$2} END {print s}')" -eq 1 ]
-  grep -q 'aquasecurity/trivy-action' "$ROOT/.github/workflows/_docker.yml"
+  # Trivy runs as the binary everywhere (trivy-action brings its own Trivy
+  # and a ~1 GB GitHub-cache round trip per run).
+  ! grep -rqE 'uses:[[:space:]]*aquasecurity/trivy-action' "$ROOT/.github/" || false
   grep -rq 'aquasecurity/setup-trivy' "$ROOT/.github/"
 }
 
@@ -408,6 +408,7 @@ XML
   grep -q "steps.semgrep.outputs.present" "$ROOT/.github/workflows/_typescript.yml"
   grep -q "steps.semgrep.outputs.present" "$ROOT/.github/workflows/_csharp.yml"
   grep -q "steps.trivy.outputs.present" "$ROOT/.github/workflows/_terraform.yml"
+  grep -q "steps.trivy.outputs.present" "$ROOT/.github/workflows/_docker.yml"
   grep -q "steps.trivy.outputs.present" "$ROOT/.github/actions/license-check/action.yml"
   grep -q "steps.trivy.outputs.present" "$ROOT/.github/actions/vuln-prioritize/action.yml"
   # Trivy's baked DB does not exist on GitHub-hosted runners, so --skip-db-update
@@ -736,8 +737,10 @@ TOML
 }
 
 @test "_docker.yml exposes opt-in reproducible Trivy DB (P3)" {
-  grep -q 'trivy-skip-db-update' "$ROOT/.github/workflows/_docker.yml"
-  grep -q 'skip-db-update:' "$ROOT/.github/workflows/_docker.yml"
+  D="$ROOT/.github/workflows/_docker.yml"
+  grep -q 'trivy-skip-db-update' "$D"
+  grep -q 'SKIP_DB_UPDATE: ${{ inputs.trivy-skip-db-update }}' "$D"
+  grep -q 'ARGS+=(--skip-db-update)' "$D"
 }
 
 @test "_typescript.yml runs install scripts only when tests or the build need them" {
@@ -856,4 +859,21 @@ TOML
   for f in "$ROOT"/examples/*/.github/workflows/attri-dev-kit.yml; do
     grep -qF "cron: '47 21 * * *'" "$f"
   done
+}
+
+@test "no ~1 GB Trivy DB round trip through the GitHub cache; PRs only read the Docker layer cache" {
+  ! grep -rqE 'path:[[:space:]]*~/\.cache/trivy' "$ROOT/.github/" || false
+  grep -qF "cache-to: \${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}" "$ROOT/.github/workflows/_docker.yml"
+}
+
+@test "detect-secrets: dev/qa PRs scan changed files; main tier and non-PR runs scan every file" {
+  A="$ROOT/.github/actions/detect-secrets/action.yml"
+  # changed-files scope only for a PR below the main tier
+  grep -qF "[ '\${{ github.event_name }}' = \"pull_request\" ] && [ \"\$TIER\" != \"main\" ]" "$A"
+  grep -qF 'git diff -z --name-only --diff-filter=ACMR' "$A"
+  grep -qF 'git ls-files -z' "$A"
+  # the no-baseline full scan keeps --all-files
+  grep -qF 'SCAN_ARGS=(--all-files)' "$A"
+  # trufflehog cache + install only when trufflehog will run
+  grep -A1 'name: Cache trufflehog binary' "$A" | grep -q "steps.strat.outputs.trufflehog == 'true'"
 }

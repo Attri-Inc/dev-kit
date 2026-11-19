@@ -89,12 +89,6 @@ jobs:
           sarif_file: checkov.sarif
           category: checkov
 
-      - name: Cache Trivy DB
-        if: inputs.run-medium == 'true'
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/trivy
-          key: trivy-db-iac-${{ runner.os }}
       # Binary rather than trivy-action, which runs Trivy in a container and
       # needs a Docker daemon. Preinstalled on self-hosted runner images.
       - name: Check for Trivy

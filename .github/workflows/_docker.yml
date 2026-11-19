@@ -107,11 +107,6 @@ jobs:
           category: hadolint-${{ matrix.dockerfile }}
       - uses: docker/setup-buildx-action@v4
         if: ${{ !cancelled() }}
-      - name: Cache Trivy DB
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/trivy
-          key: trivy-db-${{ runner.os }}
       - name: Sanitize image-ref tag
         id: tag
         shell: bash
@@ -127,21 +122,57 @@ jobs:
           load: true
           tags: ${{ steps.tag.outputs.tag }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # PRs only read the layer cache. Writing it (mode=max) uploads every
+          # layer to GitHub, ~2 min per build from a self-hosted pool; the
+          # nightly run and pushes refresh it for the PRs that follow.
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
           # v7 enables provenance + sbom by default → produces an OCI image-index
           # that breaks `docker load`. Disable both for scan builds.
           provenance: false
           sbom: false
-      - name: Trivy image scan
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      # Trivy binary, not trivy-action: the action installs its own Trivy and
+      # moves a ~1 GB DB cache to and from GitHub on every run (minutes per
+      # job from a self-hosted pool). Self-hosted runner images ship the pinned
+      # Trivy and its DB; the GitHub-hosted fallback installs it.
+      - name: Check for Trivy
+        id: trivy
+        shell: bash
+        env:
+          WANT: '0.74.0'
+        run: |
+          set -uo pipefail
+          have="$(trivy --version 2>/dev/null | head -1 | awk '{print $2}' || true)"
+          if [ "$have" = "$WANT" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Trivy ${WANT} not present (found: ${have:-none}) — installing."
+          fi
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        if: steps.trivy.outputs.present == 'false'
         with:
-          image-ref: ${{ steps.tag.outputs.tag }}
-          format: sarif
-          output: trivy-image.sarif
-          severity: HIGH,CRITICAL
-          cache-dir: ~/.cache/trivy
-          skip-db-update: ${{ inputs.trivy-skip-db-update }}
-          exit-code: ${{ inputs.fail-on == 'critical' && '1' || '0' }}
+          version: v0.74.0
+          cache: true
+      - name: Trivy image scan
+        shell: bash
+        env:
+          IMAGE: ${{ steps.tag.outputs.tag }}
+          SKIP_DB_UPDATE: ${{ inputs.trivy-skip-db-update }}
+          EXIT_CODE: ${{ inputs.fail-on == 'critical' && '1' || '0' }}
+        run: |
+          set -uo pipefail
+          ARGS=()
+          # trivy-skip-db-update: reuse the DB already on the runner, if any,
+          # so the same commit gets the same verdict.
+          if [ "$SKIP_DB_UPDATE" = "true" ] && [ -f "$HOME/.cache/trivy/db/trivy.db" ]; then
+            ARGS+=(--skip-db-update)
+          fi
+          trivy image "${ARGS[@]}" \
+            --format sarif \
+            --output trivy-image.sarif \
+            --severity HIGH,CRITICAL \
+            --exit-code "$EXIT_CODE" \
+            "$IMAGE"
       - uses: github/codeql-action/upload-sarif@v4
         # Private repos without GHAS can't upload SARIF — don't block the gate.
         continue-on-error: true
