@@ -52,8 +52,18 @@ runs:
             elif [ -f yarn.lock ]; then yarn install --frozen-lockfile && yarn build
             else npm ci && npm run build
             fi
-            tar -czf dist/typescript-build.tgz \
-              $(ls -d dist build .next out 2>/dev/null | grep -v '^dist$' | head -3)
+            # Frameworks that build into dist/ (Astro, Vite, SvelteKit static)
+            # have already left the artifact where artifact-path points, so
+            # there is nothing to pack — and tar refuses an empty file list
+            # ("Cowardly refusing to create an empty archive", exit 2). Only
+            # pack the output dirs that live outside dist/.
+            OUT_DIRS=()
+            for d in build .next out; do
+              if [ -d "$d" ]; then OUT_DIRS+=("$d"); fi
+            done
+            if [ "${#OUT_DIRS[@]}" -gt 0 ]; then
+              tar -czf dist/typescript-build.tgz "${OUT_DIRS[@]}"
+            fi
           fi
         fi
         if grep -q go <<< "$LANGS"; then
