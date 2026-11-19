@@ -68,7 +68,7 @@ runs:
         # PR (main/master/prod/release), and any non-PR run, scans every file.
         if [ '${{ github.event_name }}' = "pull_request" ] && [ "$TIER" != "main" ] && [ -n '${{ github.base_ref }}' ]; then
           echo "files=changed" >> "$GITHUB_OUTPUT"
-          echo "::notice::detect-secrets: scanning only the files this PR changes (tier=$TIER)."
+          echo "::notice::Scanning only the files this PR changes for leaked credentials (tier=$TIER)."
         else
           echo "files=all" >> "$GITHUB_OUTPUT"
         fi
@@ -136,10 +136,10 @@ runs:
           while IFS= read -r -d '' f; do FILES+=("$f"); done \
             < <(git diff -z --name-only --diff-filter=ACMR "origin/$BASE...HEAD")
           if [ "${#FILES[@]}" -eq 0 ]; then
-            echo "::notice::detect-secrets: this PR adds or changes no files to scan."
+            echo "::notice::This PR adds or changes no files to scan for leaked credentials."
             exit 0
           fi
-          echo "::notice::detect-secrets: ${#FILES[@]} changed file(s)."
+          echo "::notice::Scanning ${#FILES[@]} changed file(s) for leaked credentials."
         else
           FILES=()
           while IFS= read -r -d '' f; do FILES+=("$f"); done < <(git ls-files -z)
