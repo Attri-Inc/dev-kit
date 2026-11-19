@@ -112,6 +112,15 @@ on:
           outside the PR flow. New secrets introduced by the PR always block.
         type: string
         default: 'block'
+      secret-scan-full-branches:
+        description: |
+          Comma-separated base branches (glob patterns allowed, e.g. release/*)
+          where a PR runs the secret scan on every file. A PR into any other
+          branch scans only the files it adds or changes. Push and nightly
+          runs always scan every file. '' = no PR scans every file; '*' =
+          every PR does.
+        type: string
+        default: 'main,master,prod,production,release,release/*'
       run-supply-chain:
         description: 'Force run supply-chain jobs regardless of tier'
         type: boolean
@@ -530,6 +539,7 @@ jobs:
         with:
           tier: ${{ needs.detect.outputs.tier }}
           fail-on-historic: ${{ inputs.secret-scan-historic-mode }}
+          full-scan-branches: ${{ inputs.secret-scan-full-branches }}
 
       # ── Hygiene (docs-only included: markdown, typos and identity apply) ──
       - name: Committer identity

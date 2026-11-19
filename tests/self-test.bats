@@ -866,10 +866,26 @@ TOML
   grep -qF "cache-to: \${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}" "$ROOT/.github/workflows/_docker.yml"
 }
 
-@test "detect-secrets: dev/qa PRs scan changed files; main tier and non-PR runs scan every file" {
+@test "detect-secrets: PRs into full-scan-branches and non-PR runs scan every file; other PRs scan changed files" {
   A="$ROOT/.github/actions/detect-secrets/action.yml"
-  # changed-files scope only for a PR below the main tier
-  grep -qF "[ '\${{ github.event_name }}' = \"pull_request\" ] && [ \"\$TIER\" != \"main\" ]" "$A"
+  # Run the real scope block from action.yml on sample inputs.
+  SCOPE="$(sed -n '/^ *FILES=all$/,/^ *echo "files=\$FILES"/p' "$A" | sed '$d')"
+  [ -n "$SCOPE" ]
+  scope() { EVENT="$1" BASE="$2" FULL_SCAN_BRANCHES="$3" bash -c "$SCOPE"'; echo "$FILES"'; }
+  D='main,master,prod,production,release,release/*'
+  # The default list is the same in the action and gate.yml.
+  grep -qF "default: '$D'" "$A"
+  grep -qF "default: '$D'" "$ROOT/.github/workflows/gate.yml"
+  [ "$(scope pull_request main "$D")" = all ]
+  [ "$(scope pull_request release/1.2 "$D")" = all ]
+  [ "$(scope pull_request qa "$D")" = changed ]
+  [ "$(scope pull_request mainline "$D")" = changed ]
+  [ "$(scope push '' "$D")" = all ]
+  [ "$(scope schedule '' '')" = all ]
+  [ "$(scope pull_request main '')" = changed ]
+  [ "$(scope pull_request feat/x '*')" = all ]
+  [ "$(scope pull_request qa 'main, qa')" = all ]
+  grep -qF 'full-scan-branches: ${{ inputs.secret-scan-full-branches }}' "$ROOT/.github/workflows/gate.yml"
   grep -qF 'git diff -z --name-only --diff-filter=ACMR' "$A"
   grep -qF 'git ls-files -z' "$A"
   # the no-baseline full scan keeps --all-files

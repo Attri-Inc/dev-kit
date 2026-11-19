@@ -27,6 +27,15 @@ inputs:
       Findings introduced BY this PR always block regardless.
     required: false
     default: 'block'
+  full-scan-branches:
+    description: |
+      Comma-separated base branches (glob patterns allowed, e.g. release/*)
+      where a PR scans every file with detect-secrets. A PR into any other
+      branch scans only the files it adds or changes. Non-PR runs (push,
+      nightly) always scan every file. '' = no PR scans every file; '*' =
+      every PR does.
+    required: false
+    default: 'main,master,prod,production,release,release/*'
 
 runs:
   using: 'composite'
@@ -34,6 +43,10 @@ runs:
     - name: Resolve scan strategy
       id: strat
       shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+        BASE: ${{ github.base_ref }}
+        FULL_SCAN_BRANCHES: ${{ inputs.full-scan-branches }}
       run: |
         SH='${{ inputs.scan-history }}'
         TIER='${{ inputs.tier }}'
@@ -63,14 +76,24 @@ runs:
         else
           echo "trufflehog=false" >> "$GITHUB_OUTPUT"
         fi
-        # detect-secrets file scope. A dev/qa-tier PR scans only the files it
-        # adds or changes: a new secret can only arrive in those. A main-tier
-        # PR (main/master/prod/release), and any non-PR run, scans every file.
-        if [ '${{ github.event_name }}' = "pull_request" ] && [ "$TIER" != "main" ] && [ -n '${{ github.base_ref }}' ]; then
-          echo "files=changed" >> "$GITHUB_OUTPUT"
-          echo "::notice::Scanning only the files this PR changes for leaked credentials (tier=$TIER)."
-        else
-          echo "files=all" >> "$GITHUB_OUTPUT"
+        # detect-secrets file scope. A PR into a branch listed in
+        # full-scan-branches, and any non-PR run, scans every file. Any other
+        # PR scans only the files it adds or changes: a new secret can only
+        # arrive in those.
+        FILES=all
+        if [ "$EVENT" = "pull_request" ] && [ -n "$BASE" ]; then
+          FILES=changed
+          IFS=',' read -ra PATTERNS <<< "$FULL_SCAN_BRANCHES"
+          for p in "${PATTERNS[@]}"; do
+            p="${p//[[:space:]]/}"
+            # Unquoted $p: match it as a glob, so release/* works.
+            # shellcheck disable=SC2053
+            if [ -n "$p" ] && [[ "$BASE" == $p ]]; then FILES=all; break; fi
+          done
+        fi
+        echo "files=$FILES" >> "$GITHUB_OUTPUT"
+        if [ "$FILES" = "changed" ]; then
+          echo "::notice::Scanning only the files this PR changes for leaked credentials (base=$BASE is not in full-scan-branches)."
         fi
 
     # Only when trufflehog will run: the cache is a 35 MB download per job.
