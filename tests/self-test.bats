@@ -852,8 +852,8 @@ TOML
   job_block "$G" attestation | grep -q 'actions/build-artifact@'
   job_block "$G" attestation | grep -q 'anchore/sbom-action@'
   job_block "$G" attestation | grep -q 'actions/attest-build-provenance@'
-  # 21:47 UTC = 03:17 IST, outside working hours
+  # 19:47 UTC = 01:17 IST, outside working hours
   for f in "$ROOT"/examples/*/.github/workflows/attri-dev-kit.yml; do
-    grep -qF "cron: '47 21 * * *'" "$f"
+    grep -qF "cron: '47 19 * * *'" "$f"
   done
 }

@@ -95,7 +95,7 @@ was removed.
   that passes `test-os: '["ubuntu-latest"]'` explicitly keeps the old behavior.
 - **Build, SBOM and Sigstore are one `attestation` job** (same steps, no
   artifact hand-off between jobs).
-- **The examples schedule the nightly run at 21:47 UTC (03:17 IST)** instead
+- **The examples schedule the nightly run at 19:47 UTC (01:17 IST)** instead
   of 07:17 UTC, which fell in Indian working hours. An existing wrapper keeps
   its own `cron:` until you change it.
 - **`_ai-verification.yml` is gone**; its checks are steps of `Checks`.

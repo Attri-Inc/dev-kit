@@ -15,7 +15,7 @@ lists the safe levers — none removes a check or reduces coverage.
 | **Tests on the selected runner** | `test-os` defaults to the resolved `runner`. Before, tests always went to GitHub-hosted `ubuntu-latest`, even for self-hosted consumers. |
 | **`docs-only` short-circuit** | When a PR/push changes only markdown/docs/text/images, the expensive per-language + AI + dependency jobs skip and `gate-passed` still reports success — so wrappers need no `paths-ignore` on `pull_request`. Conservative: code/lockfiles/configs/workflows are never "docs"; secret-scanning still runs. |
 | **Artifact retention** (`artifact-retention-days`, default 7) | SBOM / compliance-evidence uploads expire in 7 days instead of GitHub's 90, curbing Actions-storage growth. |
-| **Nightly attestation** (`attestation-frequency: nightly`, default) | Scorecard / SBOM / Sigstore run once daily, not per-commit (~$80–100/mo saved). Keep the default. The examples schedule it at 21:47 UTC (03:17 IST), outside working hours, so it does not compete with PRs for runners. |
+| **Nightly attestation** (`attestation-frequency: nightly`, default) | Scorecard / SBOM / Sigstore run once daily, not per-commit (~$80–100/mo saved). Keep the default. The examples schedule it at 19:47 UTC (01:17 IST), outside working hours, so it does not compete with PRs for runners. |
 | **Tiering** (`tier: auto`) | Heavy SAST / supply-chain / scorecard run at `qa`/`main`/nightly, never on every dev push. |
 
 ## Consumer-side (per-repo wrapper — opt-in rollout)
