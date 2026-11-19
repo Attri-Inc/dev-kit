@@ -33,16 +33,23 @@ permissions:
   security-events: write
 
 jobs:
-  fmt-validate:
-    name: fmt + validate
+  # ONE job for fmt, validate, TFLint, Checkov, Trivy and Infracost: the job
+  # waits for one runner instead of five. Each step uses `!cancelled()` so all
+  # findings show in one run. `plan` stays its own job: it alone needs cloud
+  # credentials and an OIDC token.
+  terraform:
+    name: fmt, validate, lint, IaC scans
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v7
       - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ inputs.terraform-version }}
-      - run: terraform fmt -check -recursive
+      - name: terraform fmt
+        if: ${{ !cancelled() }}
+        run: terraform fmt -check -recursive
       - name: terraform init + validate (each module)
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -e
@@ -50,30 +57,24 @@ jobs:
             echo "::group::$dir"
             (cd "$dir" && terraform init -backend=false -input=false && terraform validate -no-color)
             echo "::endgroup::"
-          done < <(find . -name '*.tf' -not -path './.terraform/*' -exec dirname {} \; | sort -u)
+          done < <(find . -name '*.tf' -not -path '*/.terraform/*' -exec dirname {} \; | sort -u)
 
-  tflint:
-    name: TFLint
-    runs-on: ${{ inputs.runner }}
-    steps:
-      - uses: actions/checkout@v7
       - uses: terraform-linters/setup-tflint@v6
-      - run: tflint --init
+        if: ${{ !cancelled() }}
+      - name: TFLint
+        if: ${{ !cancelled() }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Default failure severity is "warning" — that blocks any pre-existing
-      # tflint warning (unused vars, missing version constraints, etc.) on
-      # first onboarding. Raise to error so warnings only show as job
-      # annotations; consumers can tighten back via repo-local .tflint.hcl.
-      - run: tflint --recursive --format=compact --minimum-failure-severity=error
+        # Default failure severity is "warning" — that blocks any pre-existing
+        # tflint warning on first onboarding. Raise to error so warnings only
+        # show as annotations; repos can tighten via a local .tflint.hcl.
+        run: |
+          tflint --init
+          tflint --recursive --format=compact --minimum-failure-severity=error
 
-  checkov:
-    name: Checkov
-    if: inputs.run-medium == 'true'
-    runs-on: ${{ inputs.runner }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: bridgecrewio/checkov-action@c13aafd679d3814a25067d10fcaf98c4f7594931 # v12.3131.0
+      - name: Checkov
+        if: ${{ !cancelled() && inputs.run-medium == 'true' }}
+        uses: bridgecrewio/checkov-action@c13aafd679d3814a25067d10fcaf98c4f7594931 # v12.3131.0
         with:
           directory: .
           framework: terraform
@@ -83,10 +84,96 @@ jobs:
       - uses: github/codeql-action/upload-sarif@v4
         # Private repos without GHAS can't upload SARIF — don't block the gate.
         continue-on-error: true
-        if: always() && hashFiles('checkov.sarif') != '' && !github.event.repository.private
+        if: ${{ !cancelled() && hashFiles('checkov.sarif') != '' && !github.event.repository.private }}
         with:
           sarif_file: checkov.sarif
           category: checkov
+
+      - name: Cache Trivy DB
+        if: inputs.run-medium == 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-iac-${{ runner.os }}
+      # Binary rather than trivy-action, which runs Trivy in a container and
+      # needs a Docker daemon. Preinstalled on self-hosted runner images.
+      - name: Check for Trivy
+        id: trivy
+        if: inputs.run-medium == 'true'
+        shell: bash
+        env:
+          WANT: '0.74.0'
+        run: |
+          set -uo pipefail
+          have="$(trivy --version 2>/dev/null | head -1 | awk '{print $2}' || true)"
+          if [ "$have" = "$WANT" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Trivy ${WANT} not present (found: ${have:-none}) — installing."
+          fi
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        if: steps.trivy.outputs.present == 'false'
+        with:
+          version: v0.74.0
+          cache: true
+      - name: Trivy IaC scan
+        if: ${{ !cancelled() && steps.trivy.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          # `trivy config` uses bundled misconfiguration policies rather than the
+          # vulnerability DB, so no --skip-db-update handling is needed here.
+          trivy config \
+            --format sarif \
+            --output trivy-iac.sarif \
+            --severity HIGH,CRITICAL \
+            --exit-code 0 \
+            .
+      - uses: github/codeql-action/upload-sarif@v4
+        # Private repos without GHAS can't upload SARIF — don't block the gate.
+        continue-on-error: true
+        if: ${{ !cancelled() && hashFiles('trivy-iac.sarif') != '' && !github.event.repository.private }}
+        with:
+          sarif_file: trivy-iac.sarif
+          category: trivy-iac
+
+      # ── Infracost cost diff (main tier PRs, only with INFRACOST_API_KEY) ──
+      # Runs last: it checks the PR base out into a side directory.
+      - name: Check for INFRACOST_API_KEY
+        id: infracost
+        if: ${{ !cancelled() && inputs.tier == 'main' && github.event_name == 'pull_request' }}
+        env:
+          KEY: ${{ secrets.INFRACOST_API_KEY }}
+        run: |
+          if [ -z "${KEY:-}" ]; then
+            echo "::notice::INFRACOST_API_KEY not configured — skipping infracost."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v7
+        if: ${{ !cancelled() && steps.infracost.outputs.run == 'true' }}
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .infracost-base
+      - uses: infracost/actions/setup@v4
+        if: ${{ !cancelled() && steps.infracost.outputs.run == 'true' }}
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+      - name: Infracost (cost diff)
+        if: ${{ !cancelled() && steps.infracost.outputs.run == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          infracost breakdown --path=.infracost-base --format=json --out-file=/tmp/infracost-base.json || true
+          # Remove the base copy so the head diff does not count it.
+          rm -rf .infracost-base
+          infracost diff --path=. --format=json \
+            --compare-to=/tmp/infracost-base.json --out-file=/tmp/infracost.json || true
+          infracost comment github --path=/tmp/infracost.json --repo="$GITHUB_REPOSITORY" \
+            --pull-request="$PR" --github-token="$GH_TOKEN" --behavior=update
 
   plan:
     name: terraform plan (remote state)
@@ -125,90 +212,3 @@ jobs:
               repo: context.repo.repo,
               body
             });
-
-  trivy-iac:
-    name: Trivy IaC scan
-    if: inputs.run-medium == 'true'
-    runs-on: ${{ inputs.runner }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Cache Trivy DB
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/trivy
-          key: trivy-db-iac-${{ runner.os }}
-      # Binary rather than trivy-action, which runs Trivy in a container and
-      # needs a Docker daemon. Preinstalled on self-hosted runner images.
-      - name: Check for Trivy
-        id: trivy
-        shell: bash
-        env:
-          WANT: '0.74.0'
-        run: |
-          set -uo pipefail
-          have="$(trivy --version 2>/dev/null | head -1 | awk '{print $2}' || true)"
-          if [ "$have" = "$WANT" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Trivy ${WANT} not present (found: ${have:-none}) — installing."
-          fi
-      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
-        if: steps.trivy.outputs.present != 'true'
-        with:
-          version: v0.74.0
-          cache: true
-      - name: Trivy IaC scan
-        shell: bash
-        run: |
-          set -uo pipefail
-          # `trivy config` uses bundled misconfiguration policies rather than the
-          # vulnerability DB, so no --skip-db-update handling is needed here.
-          trivy config \
-            --format sarif \
-            --output trivy-iac.sarif \
-            --severity HIGH,CRITICAL \
-            --exit-code 0 \
-            .
-      - uses: github/codeql-action/upload-sarif@v4
-        # Private repos without GHAS can't upload SARIF — don't block the gate.
-        continue-on-error: true
-        if: always() && hashFiles('trivy-iac.sarif') != '' && !github.event.repository.private
-        with:
-          sarif_file: trivy-iac.sarif
-          category: trivy-iac
-
-  infracost:
-    name: Infracost (cost diff)
-    if: inputs.tier == 'main'
-    runs-on: ${{ inputs.runner }}
-    env:
-      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
-    steps:
-      - name: Skip if INFRACOST_API_KEY not set
-        id: gate
-        run: |
-          if [ -z "${INFRACOST_API_KEY:-}" ]; then
-            echo "::notice::INFRACOST_API_KEY not configured — skipping infracost."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/checkout@v7
-        if: steps.gate.outputs.skip != 'true'
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-      - uses: infracost/actions/setup@v4
-        if: steps.gate.outputs.skip != 'true'
-        with:
-          api-key: ${{ secrets.INFRACOST_API_KEY }}
-      - name: Generate baseline cost
-        if: steps.gate.outputs.skip != 'true'
-        run: infracost breakdown --path=. --format=json --out-file=/tmp/infracost-base.json || true
-      - uses: actions/checkout@v7
-        if: steps.gate.outputs.skip != 'true'
-      - name: Generate diff
-        if: steps.gate.outputs.skip != 'true'
-        run: infracost diff --path=. --format=json --compare-to=/tmp/infracost-base.json --out-file=/tmp/infracost.json || true
-      - run: infracost comment github --path="/tmp/infracost.json" --repo="$GITHUB_REPOSITORY" --pull-request="${{ github.event.pull_request.number }}" --github-token="${{ secrets.GITHUB_TOKEN }}" --behavior=update
-        if: github.event_name == 'pull_request' && steps.gate.outputs.skip != 'true'

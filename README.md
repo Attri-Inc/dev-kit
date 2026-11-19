@@ -29,7 +29,7 @@ on:
     branches: [main, master, dev, dev-*, develop, qa, uat, staging, release/*]
     # No paths-ignore on pull_request: a filtered-out PR never reports "Gate passed" and stays blocked.
   schedule:
-    - cron: '17 7 * * *'   # daily nightly attestation (Scorecard + SBOM + Sigstore)
+    - cron: '47 21 * * *'  # daily nightly attestation, 03:17 IST (Scorecard + SBOM + Sigstore)
 concurrency:
   group: attri-dev-kit-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -110,7 +110,7 @@ project or service account is required for one-way alerts.
 
 ## AI-verification checks
 
-Hard-block PRs introducing AI-generated patterns the deep-research pass surfaced as the highest-risk classes. Wired into `_ai-verification.yml` and required by `gate-passed`.
+Hard-block PRs introducing AI-generated patterns the deep-research pass surfaced as the highest-risk classes. They run as steps of the gate's `checks` job, which `gate-passed` requires.
 
 - **`lint-disable`** — blocks PRs that add unjustified `# noqa`, `# type: ignore`, `// @ts-ignore`, `// eslint-disable`, etc. Bypass via inline `# reason: <why>` or `lint-disable-approved` PR label. Escalates message when the disable was added by an AI-authored commit.
 

@@ -22,9 +22,10 @@ on:
   # By default, these only run on `schedule:` triggers —
   # saves ~$80-100/mo by attesting once/day instead of per-merge. Override
   # via `attestation-frequency: per-commit` if you need per-merge signing.
-  # Off-hour minute (07:17 UTC) to avoid GitHub cron herd contention.
+  # 21:47 UTC = 03:17 IST: outside working hours, so the nightly run does not
+  # compete with PRs for runners. Off-the-hour minute avoids GitHub's cron rush.
   schedule:
-    - cron: '17 7 * * *'
+    - cron: '47 21 * * *'
 
 concurrency:
   group: attri-dev-kit-${{ github.workflow }}-${{ github.ref }}

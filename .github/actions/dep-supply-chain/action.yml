@@ -40,7 +40,10 @@ runs:
           echo "::notice::Not a PR — skipping dep-supply-chain."
           exit 0
         fi
-        git fetch origin "$BASE" --depth=50 2>/dev/null || true
+        # Fetch only when missing: a --depth fetch into a full clone cuts its history.
+        git rev-parse -q --verify "refs/remotes/origin/$BASE" >/dev/null \
+          || git fetch --no-tags --depth=50 origin "$BASE:refs/remotes/origin/$BASE" 2>/dev/null \
+          || true
         NOW=$(date -u +%s)
         FINDINGS=0; REPORT=""
         flag() { REPORT+="| $1 | $2 |"$'\n'; FINDINGS=$((FINDINGS+1)); }

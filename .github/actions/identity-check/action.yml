@@ -40,7 +40,10 @@ runs:
           BASE="${{ inputs.base-ref }}"
         elif [ -n "${GITHUB_BASE_REF:-}" ]; then
           BASE="origin/${GITHUB_BASE_REF}"
-          git fetch origin "${GITHUB_BASE_REF}" --depth=50 2>/dev/null || true
+          # Fetch only when missing: a --depth fetch into a full clone cuts its history.
+          git rev-parse -q --verify "refs/remotes/origin/${GITHUB_BASE_REF}" >/dev/null \
+            || git fetch --no-tags --depth=50 origin "${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}" 2>/dev/null \
+            || true
         else
           BASE="HEAD~1"
         fi

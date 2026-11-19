@@ -31,21 +31,25 @@ permissions:
   security-events: write   # SARIF upload from the Semgrep SAST job
 
 jobs:
-  security:
-    name: Security (Semgrep CLI)
-    # C#/.NET SAST — mirrors the TypeScript security job: non-invasive external
-    # scan (no analyzer packages forced into consumer projects), SARIF to code
-    # scanning. Advisory (findings surface as annotations). (SSoT catalog: C# SAST P0)
-    if: inputs.run-medium == 'true'
+  # ONE job: the SDK is set up and packages restored once, and the job waits
+  # for one runner instead of three. Each step uses `!cancelled()` so all
+  # findings show in one run.
+  csharp:
+    name: Security, format, build, tests
     runs-on: ${{ inputs.runner }}
-    # Installed rather than run via `container: semgrep/semgrep` — see the
-    # matching note in _typescript.yml. Avoids requiring a Docker daemon.
     steps:
+      # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
       - uses: actions/checkout@v7
-      # See the matching note in _typescript.yml: skip the install entirely when
-      # the runner image already ships the pinned Semgrep.
+        with:
+          fetch-depth: 0
+
+      # C#/.NET SAST: non-invasive external scan (no analyzer packages forced
+      # into consumer projects), SARIF to code scanning. Advisory. Installed
+      # rather than run in the semgrep container — no Docker daemon needed.
+      # Self-hosted runner images ship it preinstalled at the pinned version.
       - name: Check for Semgrep
         id: semgrep
+        if: inputs.run-medium == 'true'
         shell: bash
         env:
           WANT: '1.97.0'
@@ -60,13 +64,14 @@ jobs:
             echo "::notice::Semgrep ${WANT} not present (found: ${have:-none}) — installing."
           fi
       - uses: actions/setup-python@v7
-        if: steps.semgrep.outputs.present != 'true'
+        if: steps.semgrep.outputs.present == 'false'
         with:
           python-version: '3.12'
       - name: Install Semgrep
-        if: steps.semgrep.outputs.present != 'true'
+        if: steps.semgrep.outputs.present == 'false'
         run: pip install --disable-pip-version-check semgrep==1.97.0
-      - name: Run Semgrep
+      - name: Security (Semgrep)
+        if: ${{ !cancelled() && steps.semgrep.outcome == 'success' }}
         run: |
           semgrep scan \
             --config p/csharp --config p/owasp-top-ten --config p/secrets \
@@ -75,50 +80,40 @@ jobs:
       - uses: github/codeql-action/upload-sarif@v4
         # Private repos without GHAS can't upload SARIF — don't block the gate.
         continue-on-error: true
-        if: always() && hashFiles('semgrep.sarif') != '' && !github.event.repository.private
+        if: ${{ !cancelled() && hashFiles('semgrep.sarif') != '' && !github.event.repository.private }}
         with:
           sarif_file: semgrep.sarif
           category: semgrep-csharp
 
-  format:
-    name: dotnet format
-    runs-on: ${{ inputs.runner }}
-    steps:
-      - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ inputs.dotnet-version }}
-          cache: true
+          cache: ${{ hashFiles('**/packages.lock.json') != '' }}
           cache-dependency-path: '**/packages.lock.json'
-      - run: dotnet restore --locked-mode 2>/dev/null || dotnet restore
-      - run: dotnet format --verify-no-changes --severity warn
-
-  build-test:
-    name: Build + Test
-    runs-on: ${{ inputs.runner }}
-    steps:
-      # fetch-depth: 0 so the diff-coverage gate can find the PR merge-base.
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-dotnet@v6
-        with:
-          dotnet-version: ${{ inputs.dotnet-version }}
-      # --locked-mode installs strictly from packages.lock.json when present
-      # (fails on drift); falls back to a normal restore if no lockfile exists.
-      # Matches the format job. (SSoT: lockfile integrity P0)
-      - run: dotnet restore --locked-mode 2>/dev/null || dotnet restore
-      - run: dotnet build --no-restore --configuration Release
+      # --locked-mode installs strictly from packages.lock.json when present;
+      # falls back to a normal restore if no lockfile exists.
+      - name: Restore
+        id: restore
+        if: ${{ !cancelled() }}
+        run: dotnet restore --locked-mode 2>/dev/null || dotnet restore
+      - name: dotnet format
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
+        run: dotnet format --no-restore --verify-no-changes --severity warn
+      - name: Build
+        id: build
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
+        run: dotnet build --no-restore --configuration Release
       # --collect "XPlat Code Coverage" makes coverlet (bundled with the test SDK)
       # emit coverage.cobertura.xml. Harmless no-op if the project lacks coverlet.
-      - run: dotnet test --no-build --configuration Release --collect:"XPlat Code Coverage" --logger "trx;LogFileName=test-results.trx"
+      - name: Test
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: dotnet test --no-build --configuration Release --collect:"XPlat Code Coverage" --logger "trx;LogFileName=test-results.trx"
         continue-on-error: ${{ inputs.tier == 'dev' }}
       # Consume-if-present: coverlet's Cobertura uses ABSOLUTE source paths; strip
-      # the workspace prefix so they're repo-relative for diff-cover (same class of
-      # fix as Go's module-prefix strip). (warn-first)
+      # the workspace prefix so they're repo-relative for diff-cover. (warn-first)
       - name: Locate coverage report
         id: cov
-        if: github.event_name == 'pull_request'
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         run: |
           REPORT="$(find . -name 'coverage.cobertura.xml' 2>/dev/null | head -1)"
           if [ -n "$REPORT" ]; then
@@ -129,11 +124,11 @@ jobs:
             echo "::notice::No coverage.cobertura.xml found. Add the coverlet.collector package to your test project to activate the patch-coverage gate."
           fi
       - uses: actions/setup-python@v7
-        if: steps.cov.outputs.report != ''
+        if: ${{ !cancelled() && steps.cov.outputs.report != '' }}
         with:
           python-version: '3.12'
       - name: Diff coverage gate
-        if: steps.cov.outputs.report != ''
+        if: ${{ !cancelled() && steps.cov.outputs.report != '' }}
         uses: Attri-Inc/dev-kit/.github/actions/diff-coverage@main
         with:
           report: ${{ steps.cov.outputs.report }}
