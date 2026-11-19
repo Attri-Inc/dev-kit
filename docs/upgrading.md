@@ -78,6 +78,23 @@ If a kit change breaks your repo:
 
 ## Migration notes
 
+### 2026-11-19 — choose which branches get the full secret scan
+
+- **New input `secret-scan-full-branches`.** A comma-separated list of base
+  branches (glob patterns such as `release/*` work). A PR into a listed branch
+  scans every file with detect-secrets. A PR into any other branch scans only
+  the files it adds or changes. Push and nightly runs always scan every file.
+- **The default is `main,master,prod,production,release,release/*`**: the same
+  branches as the `main` tier, so nothing changes unless you set it. The scope
+  now follows the PR's base branch, not the `tier` input.
+- `'*'` makes every PR scan every file. `''` makes every PR scan only its
+  changed files. trufflehog is unchanged.
+
+  ```yaml
+  with:
+    secret-scan-full-branches: 'main,qa'
+  ```
+
 ### 2026-11-19 — less cache traffic, narrower dev/qa secret scan
 
 - **detect-secrets on a `dev`/`qa`-tier PR scans only the files the PR adds or
