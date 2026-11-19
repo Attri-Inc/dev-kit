@@ -52,11 +52,30 @@ runs:
         # no-baseline path, closing that blind spot with ~0 false positives. (audit H4)
         if [ -f '${{ inputs.baseline-file }}' ]; then
           echo "baseline-exists=true" >> "$GITHUB_OUTPUT"
+          BASELINE_EXISTS=true
         else
           echo "baseline-exists=false" >> "$GITHUB_OUTPUT"
+          BASELINE_EXISTS=false
+        fi
+        # trufflehog runs above dev tier, and at every tier without a baseline.
+        if [ "$TIER" != "dev" ] || [ "$BASELINE_EXISTS" = "false" ]; then
+          echo "trufflehog=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "trufflehog=false" >> "$GITHUB_OUTPUT"
+        fi
+        # detect-secrets file scope. A dev/qa-tier PR scans only the files it
+        # adds or changes: a new secret can only arrive in those. A main-tier
+        # PR (main/master/prod/release), and any non-PR run, scans every file.
+        if [ '${{ github.event_name }}' = "pull_request" ] && [ "$TIER" != "main" ] && [ -n '${{ github.base_ref }}' ]; then
+          echo "files=changed" >> "$GITHUB_OUTPUT"
+          echo "::notice::Scanning only the files this PR changes for leaked credentials (tier=$TIER)."
+        else
+          echo "files=all" >> "$GITHUB_OUTPUT"
         fi
 
+    # Only when trufflehog will run: the cache is a 35 MB download per job.
     - name: Cache trufflehog binary
+      if: steps.strat.outputs.trufflehog == 'true'
       uses: actions/cache@v6
       with:
         path: /opt/trufflehog
@@ -64,6 +83,8 @@ runs:
 
     - name: Install detect-secrets + trufflehog OSS
       shell: bash
+      env:
+        NEED_TRUFFLEHOG: ${{ steps.strat.outputs.trufflehog }}
       run: |
         set -euo pipefail
         # Runner images may ship the pinned tools; install only what is missing.
@@ -74,6 +95,7 @@ runs:
         else
           pip install --quiet "detect-secrets==${DS_WANT}" --break-system-packages
         fi
+        [ "$NEED_TRUFFLEHOG" = "true" ] || exit 0
         have="$(trufflehog --version 2>&1 | awk '{print $2}' || true)"
         if [ "$have" = "$TH_WANT" ]; then
           echo "::notice::trufflehog ${TH_WANT} preinstalled — skipping install."
@@ -88,6 +110,9 @@ runs:
 
     - name: detect-secrets scan (current tree)
       shell: bash
+      env:
+        FILES_SCOPE: ${{ steps.strat.outputs.files }}
+        BASE: ${{ github.base_ref }}
       run: |
         # detect-secrets-hook exit codes:
         #   0 = no secrets, baseline unchanged
@@ -99,9 +124,29 @@ runs:
         set +e
         set -uo pipefail
         BASELINE='${{ inputs.baseline-file }}'
+
+        # Files to scan, NUL-separated so names with spaces stay whole.
+        if [ "$FILES_SCOPE" = "changed" ]; then
+          # Fetch only when missing: a --depth fetch into a full clone cuts its history.
+          git rev-parse -q --verify "refs/remotes/origin/$BASE" >/dev/null \
+            || git fetch --no-tags --depth=50 origin "$BASE:refs/remotes/origin/$BASE" 2>/dev/null \
+            || true
+          # Added, copied, modified or renamed: a deleted file has nothing to scan.
+          FILES=()
+          while IFS= read -r -d '' f; do FILES+=("$f"); done \
+            < <(git diff -z --name-only --diff-filter=ACMR "origin/$BASE...HEAD")
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::notice::This PR adds or changes no files to scan for leaked credentials."
+            exit 0
+          fi
+          echo "::notice::Scanning ${#FILES[@]} changed file(s) for leaked credentials."
+        else
+          FILES=()
+          while IFS= read -r -d '' f; do FILES+=("$f"); done < <(git ls-files -z)
+        fi
+
         if [ -f "$BASELINE" ]; then
-          # shellcheck disable=SC2046 # ls-files output is intentional space-split
-          detect-secrets-hook --baseline "$BASELINE" $(git ls-files | tr '\n' ' ')
+          detect-secrets-hook --baseline "$BASELINE" "${FILES[@]}"
           rc=$?
           case $rc in
             0)
@@ -131,7 +176,10 @@ runs:
           # Alembic/Django/Rails — high-entropy MODELS_STATE blobs), test
           # snapshots, Playwright/Cypress report dirs, Storybook build output,
           # and codegen artifacts (*.generated.*, protobuf *_pb.go/*_pb2.py).
-          detect-secrets scan --all-files \
+          # A full scan keeps --all-files (untracked files too); a changed-files
+          # scan gets the list.
+          if [ "$FILES_SCOPE" = "changed" ]; then SCAN_ARGS=("${FILES[@]}"); else SCAN_ARGS=(--all-files); fi
+          detect-secrets scan "${SCAN_ARGS[@]}" \
             --exclude-files '\.git/' \
             --exclude-files 'node_modules/' \
             --exclude-files '\.terraform/' \
@@ -189,7 +237,7 @@ runs:
       # fresh detect-secrets scan excludes migrations/ (and other dirs), so a
       # verified live secret committed there would be caught by nothing at dev.
       # Run trufflehog at every tier on the no-baseline path to close that gap. (audit H4)
-      if: inputs.tier != 'dev' || steps.strat.outputs.baseline-exists == 'false'
+      if: steps.strat.outputs.trufflehog == 'true'
       run: |
         set -uo pipefail
         if [ '${{ steps.strat.outputs.scan-history }}' = 'true' ]; then

@@ -78,6 +78,21 @@ If a kit change breaks your repo:
 
 ## Migration notes
 
+### 2026-11-19 — less cache traffic, narrower dev/qa secret scan
+
+- **detect-secrets on a `dev`/`qa`-tier PR scans only the files the PR adds or
+  changes.** A new secret can only arrive in those. A `main`-tier PR
+  (main/master/prod/production/release) and every non-PR run (push, nightly)
+  still scan every file. trufflehog is unchanged.
+- **The trufflehog binary is restored from cache only when trufflehog runs**
+  (not at `dev` tier with a baseline).
+- **Docker image scan runs the Trivy binary**, not `trivy-action`. The action
+  installed its own Trivy and moved a ~1 GB DB cache to and from GitHub on
+  every run. `trivy-skip-db-update` keeps its meaning.
+- **PRs only read the Docker layer cache.** Pushes and the nightly run write it.
+- **The Terraform IaC scan no longer restores the Trivy DB cache**: `trivy
+  config` does not use the vulnerability DB.
+
 ### 2026-11-18 — fewer jobs, less waiting
 
 On a self-hosted pool each job waits for a free runner, and that wait was most
