@@ -60,7 +60,7 @@ jobs:
 
       - name: Lint (Checkstyle)
         if: ${{ !cancelled() }}
-        uses: nikitasavinov/checkstyle-action@abc337fbc4a4f95ccc95e138a16f65b1899796ed # 1.0.0
+        uses: nikitasavinov/checkstyle-action@b2b59945760a9fc92400c85db8ca9a49c690b2a4 # 1.0.1
         with:
           reporter: github-pr-review
           level: warning
