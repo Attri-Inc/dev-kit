@@ -58,6 +58,29 @@ jobs:
           java-version: ${{ inputs.java-version }}
           cache: ${{ steps.d.outputs.bt != 'none' && steps.d.outputs.bt || '' }}
 
+      # GitHub-hosted images ship Maven; self-hosted runner images may not
+      # ("mvn: command not found"). Install the pinned release only when absent.
+      - name: Ensure Maven
+        if: steps.d.outputs.bt == 'maven'
+        env:
+          WANT: '3.9.16'
+          SHA512: '831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6'
+        run: |
+          set -euo pipefail
+          if command -v mvn >/dev/null; then
+            mvn -v | head -1
+            exit 0
+          fi
+          echo "::notice::Maven not on the runner — installing ${WANT}."
+          TGZ="$RUNNER_TEMP/maven.tgz"
+          curl -fsSL -o "$TGZ" \
+            "https://archive.apache.org/dist/maven/maven-3/${WANT}/binaries/apache-maven-${WANT}-bin.tar.gz"
+          echo "${SHA512}  ${TGZ}" | sha512sum -c -
+          mkdir -p "$RUNNER_TEMP/maven"
+          tar -xzf "$TGZ" -C "$RUNNER_TEMP/maven" --strip-components=1
+          rm -f "$TGZ"
+          echo "$RUNNER_TEMP/maven/bin" >> "$GITHUB_PATH"
+
       - name: Lint (Checkstyle)
         if: ${{ !cancelled() }}
         uses: nikitasavinov/checkstyle-action@b2b59945760a9fc92400c85db8ca9a49c690b2a4 # 1.0.1
