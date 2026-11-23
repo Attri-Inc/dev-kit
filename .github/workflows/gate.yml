@@ -635,7 +635,7 @@ jobs:
         continue-on-error: true
       - name: Typo check
         if: ${{ !cancelled() && needs.detect.outputs.run-medium == 'true' }}
-        uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
+        uses: crate-ci/typos@276087d9a4f06398b3e04825487805e2d7375888 # v1.52.2
         continue-on-error: true
 
       # ── Code scan (skipped on docs-only) ──
@@ -872,7 +872,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { persist-credentials: false }
-      - uses: ossf/scorecard-action@v2.4.4
+      - uses: ossf/scorecard-action@v2.6.0
         with:
           results_file: scorecard-results.sarif
           results_format: sarif
