@@ -170,7 +170,7 @@ jobs:
       # uv installs packages far faster than pip. Its GitHub cache is on only
       # for GitHub-hosted runners ('auto'); a self-hosted runner that sets
       # UV_CACHE_DIR to a persistent volume keeps its own cache instead.
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
 
       # ── Repo-owned hooks (canonical when present) ──
       - name: Cache pre-commit envs

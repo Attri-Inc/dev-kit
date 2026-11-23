@@ -74,7 +74,7 @@ jobs:
 
       - name: Checkov
         if: ${{ !cancelled() && inputs.run-medium == 'true' }}
-        uses: bridgecrewio/checkov-action@c13aafd679d3814a25067d10fcaf98c4f7594931 # v12.3131.0
+        uses: bridgecrewio/checkov-action@b17b606d6ec72bb8ba5721ad5b7e340b80a9fc39 # v12.3142.0
         with:
           directory: .
           framework: terraform
